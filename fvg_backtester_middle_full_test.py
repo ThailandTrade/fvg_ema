@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# postgres_fvg_backtester_PANDAS_FULL_FINAL_V3.py
+# postgres_fvg_backtester_PANDAS_SMART_FULL.py
 
 import os
 import re
@@ -30,13 +30,22 @@ DATE_FORMAT = "%Y-%m-%d"
 DEFAULT_RR = Decimal("0.9")
 MAX_WAIT_CANDLES = 5
 SCAN_TF = "30m"           # Unité de temps pour la détection du setup
-EXECUTION_TF_SUFFIX = "1m" # Timeframe pour l'exécution précise
+EXECUTION_TF_SUFFIX = "3m" # Timeframe pour l'exécution précise
 DEFAULT_RISK_PER_TRADE = Decimal("0.003") 
 DEFAULT_FEES_PCT = Decimal("0.10") # 10% de frais par trade (calculé sur le risque 1R)
 
+# --- CONFIG SMART MONEY FILTERS (NOUVEAU) ---
+# Filtre Displacement : La bougie doit être X fois plus grande que la moyenne
+USE_DISPLACEMENT_FILTER = True
+MIN_BODY_RATIO = 1.2 
+
+# Filtre Momentum : RSI > 50 pour Long, RSI < 50 pour Short
+USE_RSI_FILTER = True
+RSI_PERIOD = 14
+
 # --- PARAMETRES DU SUMMARY ---
 INITIAL_BALANCE = Decimal("50000.00") # Capital de départ pour la simulation
-SHOW_ALL_TRADES = True               # Mettre à True pour voir la liste complète, False pour les 3 derniers
+SHOW_ALL_TRADES = False               # Mettre à True pour voir la liste complète, False pour les 3 derniers
 
 # ---------- CONSTANTES POUR STDEV ----------
 STDEV_PERIOD = 200 
@@ -110,12 +119,25 @@ def get_pg_engine():
         sys.exit(1)
 
 
-# --- Fetch Rates (OPTIMISÉ AVEC PANDAS) ---
+# --- Fetch Rates (OPTIMISÉ AVEC PANDAS + CALCUL INDICATEURS) ---
+
+def calculate_rsi_pandas(series, period=14):
+    """Calcul du RSI vectorisé avec Pandas"""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).fillna(0)
+    loss = (-delta.where(delta < 0, 0)).fillna(0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50) # Fill NaN avec 50 (neutre) au début
 
 def fetch_htf_data_pandas(engine, pair: str, tf: str, start_ms: Optional[int], end_ms: Optional[int]) -> Optional[List[Dict[str, Any]]]:
     """
-    Charge les données HTF (30m) via Pandas et pré-calcule le StDev instantanément (vectorisation).
-    Renvoie une liste de dictionnaires pour garder la compatibilité avec la logique existante.
+    Charge les données HTF (30m) via Pandas et pré-calcule :
+    1. StDev (Volatilité)
+    2. RSI (Momentum)
+    3. Body Size Average (Displacement)
     """
     base, quote = pair[:3], pair[3:]
     scale = price_scale(base, quote)
@@ -125,7 +147,7 @@ def fetch_htf_data_pandas(engine, pair: str, tf: str, start_ms: Optional[int], e
     query = f"SELECT ts as time, open, high, low, close, ema_50 FROM {table_name}"
     conditions = []
     
-    # Buffer de sécurité pour le calcul StDev (200 bougies * 30m approx 4 jours, on prend 20 jours large)
+    # Buffer de sécurité pour le calcul StDev/RSI
     safe_buffer_ms = timedelta(days=20).total_seconds() * 1000
     
     if start_ms is not None:
@@ -145,19 +167,26 @@ def fetch_htf_data_pandas(engine, pair: str, tf: str, start_ms: Optional[int], e
             return None
 
         # --- PRÉ-CALCUL DU STDEV (VECTORISÉ) ---
-        # Logique identique : gap = abs(low[i] - high[i-2])
-        # shift(2) décale les données de 2 rangs vers le bas pour aligner high[i-2] avec low[i]
         gap_series = (df['low'] - df['high'].shift(2)).abs()
-        
-        # Calcul glissant du StDev sur 200 périodes
-        # ddof=1 pour correspondre à statistics.stdev (sample stdev)
         df['stdev_200'] = gap_series.rolling(window=STDEV_PERIOD).std(ddof=1)
-        
-        # On remplit les NaN par 0.0 (pour les premières 200 bougies)
         df['stdev_200'] = df['stdev_200'].fillna(0.0)
 
-        # Conversion en liste de dictionnaires (records) pour ne pas casser ta logique 'detect_fvg_setup'
-        # C'est très rapide.
+        # --- PRÉ-CALCUL DU RSI (VECTORISÉ) ---
+        if USE_RSI_FILTER:
+            df['rsi'] = calculate_rsi_pandas(df['close'], RSI_PERIOD)
+        else:
+            df['rsi'] = 50.0 # Neutre si désactivé
+
+        # --- PRÉ-CALCUL DU BODY SIZE (VECTORISÉ pour Displacement) ---
+        if USE_DISPLACEMENT_FILTER:
+            # Taille du corps absolue
+            df['body_size'] = (df['close'] - df['open']).abs()
+            # Moyenne des 10 dernières bougies (shift(1) pour ne pas inclure la bougie actuelle dans sa propre moyenne)
+            df['avg_body_10'] = df['body_size'].rolling(window=10).mean().shift(1).fillna(0.0)
+        else:
+            df['body_size'] = 0.0
+            df['avg_body_10'] = 0.0
+
         return df.to_dict('records')
 
     except Exception as e:
@@ -274,17 +303,22 @@ def check_fvg_volatility_optimized(rates: List[Dict[str, Any]], i: int, threshol
     return is_bullish, is_bearish, score, current_gap
 
 # ----------------------------------------------------------------------
-# 🛑 FONCTION ENTRÉE : 50% FVG, SL sur bougie i-1 
+# 🛑 FONCTION ENTRÉE : 50% FVG, SL sur bougie i-1, AVEC SMART FILTERS
 # ----------------------------------------------------------------------
 
 def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_threshold: float, stdev_max: float) -> Optional[Dict[str, Any]]:
     # Détection du setup FVG/EMA 50
-    if i < 2: return None
+    if i < 20: return None # Besoin d'un peu plus d'historique pour les moyennes
     
     # Extraction des données des trois bougies
     ema50 = rates[i]["ema_50"]
     h_i_2 = rates[i-2]["high"]; l_i_2 = rates[i-2]["low"]
     h_i_1 = rates[i-1]["high"]; l_i_1 = rates[i-1]["low"] # Données de la bougie i-1
+    
+    # Données pour les filtres avancés
+    current_rsi = rates[i]["rsi"]
+    current_body = rates[i]["body_size"]
+    avg_body = rates[i]["avg_body_10"]
     
     if ema50 is None or pd.isna(ema50): return None
     
@@ -295,7 +329,15 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
     if score > stdev_max: # Filtre de borne haute du score
         return None
 
+    # --- FILTRE 1 : DISPLACEMENT (SMC) ---
+    # Si la bougie qui crée le FVG n'est pas significativement plus grande que la moyenne, on filtre.
+    if USE_DISPLACEMENT_FILTER and avg_body > 0:
+        ratio = current_body / avg_body
+        if ratio < MIN_BODY_RATIO:
+            return None # Rejet : Manque de puissance (Displacement)
+
     ema_ok = False
+    rsi_ok = False
     entry_price = Decimal(0)
     sl_price = Decimal(0)
     
@@ -311,11 +353,18 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
         # 1. Nouvelle Entrée: 50% du FVG (Midpoint)
         entry_price = (fvg_high + fvg_low) / Decimal("2.0")
         
-        # 2. Nouveau SL: Low de la bougie i-1 (l_i_1)
+        # 2. SL ORIGINE: Low de la bougie i-1 (l_i_1)
         sl_price = Decimal(str(l_i_1))
         
         # Filtre EMA 50: L'entrée doit être au-dessus de l'EMA 50
         ema_ok = entry_price > Decimal(str(ema50))
+        
+        # --- FILTRE 2 : MOMENTUM REGIME (RSI) ---
+        # En tendance haussière saine, le RSI doit soutenir le mouvement (> 50)
+        if USE_RSI_FILTER:
+            rsi_ok = current_rsi > 50
+        else:
+            rsi_ok = True
         
         # Validation du SL: SL doit être strictement inférieur à l'entrée (Long)
         if sl_price >= entry_price:
@@ -331,11 +380,18 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
         # 1. Nouvelle Entrée: 50% du FVG (Midpoint)
         entry_price = (fvg_high + fvg_low) / Decimal("2.0")
         
-        # 2. Nouveau SL: High de la bougie i-1 (h_i_1)
+        # 2. SL ORIGINE: High de la bougie i-1 (h_i_1)
         sl_price = Decimal(str(h_i_1))
         
         # Filtre EMA 50: L'entrée doit être en-dessous de l'EMA 50
         ema_ok = entry_price < Decimal(str(ema50))
+        
+        # --- FILTRE 2 : MOMENTUM REGIME (RSI) ---
+        # En tendance baissière saine, le RSI doit soutenir le mouvement (< 50)
+        if USE_RSI_FILTER:
+            rsi_ok = current_rsi < 50
+        else:
+            rsi_ok = True
         
         # Validation du SL: SL doit être strictement supérieur à l'entrée (Short)
         if sl_price <= entry_price:
@@ -344,6 +400,7 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
     else: return None  
 
     if not ema_ok: return None
+    if not rsi_ok: return None # Rejet par le filtre RSI
     
     # L'entrée est conditionnée au prix 'entry_price' calculé
     return {
@@ -466,8 +523,8 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
 
             # --- EXECUTION EN MÉMOIRE ---
             result, exit_ts = run_ltf_simulation_memory(
-                ltf_data,           # On passe la LISTE COMPLÈTE
-                ltf_start_idx,      # On donne le POINT DE DÉPART
+                ltf_data,            # On passe la LISTE COMPLÈTE
+                ltf_start_idx,       # On donne le POINT DE DÉPART
                 entry=float(setup["entry_price"]), 
                 sl=float(setup["sl_price"]), 
                 tp=float(tp_price), 
@@ -776,8 +833,7 @@ def display_keepers_csv(results: List[Dict[str, Any]]):
     # LOGIQUE DE FILTRE AMÉLIORÉE ICI
     keepers = []
     for r in results:
-        if (r['total_trades'] >= 30 and 
-            r['profit_factor'] >= 1.1 and
+        if (r['profit_factor'] >= 1.0 and 
             r['win_rate'] >= 60.0):
             keepers.append(r)
             

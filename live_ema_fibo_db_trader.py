@@ -17,19 +17,23 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 # ---------- CONFIGURATION ----------
-TIMEFRAME_STR = "30m"
-TIMEFRAME_MT5_MIN = 30
+TIMEFRAME_STR = "15m"          # Adapté pour la nouvelle stratégie
+TIMEFRAME_MT5_MIN = 15
 MAGIC_NUMBER = 888888
-ORDER_COMMENT = ""
+ORDER_COMMENT = "GoldenTrend"
 
 # Estimation des commissions (Ex: 5 USD par lot Round-Turn)
 ESTIMATED_COMM_PER_LOT = 5.0 
 
-# Paramètres Stratégie
-MAX_WAIT_CANDLES = 4 
-STDEV_PERIOD = 200
-DEFAULT_RR = 0.9
-RISK_PERCENT = 0.0015 # 0.1% par trade
+# Paramètres Stratégie Golden Trend
+MAX_WAIT_CANDLES = 32         # 8 heures en 15m
+EMA_TREND_PERIOD = 200
+FIB_RETREACEMENT = 0.618
+SWING_CONFIRMATION_LAG = 5 
+STDEV_PERIOD = 200            # Gardé pour compatibilité structurelle
+
+DEFAULT_RR = 2.0              # Mis à jour pour la nouvelle stratégie
+RISK_PERCENT = 0.0005          # 1% par trade
 STDEV_THRESHOLD = 0.5
 STDEV_MAX = 1.0
 
@@ -49,6 +53,14 @@ def get_pg_engine():
 
 def sanitize_name(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
+    
+def calculate_ema_pandas_style(prices: List[float], period: int) -> float:
+    if len(prices) < period: return 0.0
+    alpha = 2 / (period + 1)
+    ema = sum(prices[:period]) / period
+    for price in prices[period:]:
+        ema = (price * alpha) + (ema * (1 - alpha))
+    return ema
 
 # ---------- RÉCUPÉRATION DONNÉES ----------
 
@@ -58,7 +70,7 @@ def fetch_last_candles_from_db(engine, pair: str, limit: int = 250) -> Optional[
     table_name = f"candles_mt5_{s_pair}_{s_tf}"
     
     query = text(f"""
-        SELECT ts, open, high, low, close, ema_50 
+        SELECT ts, open, high, low, close
         FROM {table_name} 
         ORDER BY ts DESC 
         LIMIT :limit
@@ -71,9 +83,6 @@ def fetch_last_candles_from_db(engine, pair: str, limit: int = 250) -> Optional[
         if not result:
             return None
         
-        if limit > 20 and len(result) < STDEV_PERIOD + 5:
-            return None
-            
         rows = list(reversed(result))
         
         rates = []
@@ -83,8 +92,7 @@ def fetch_last_candles_from_db(engine, pair: str, limit: int = 250) -> Optional[
                 "open": float(r.open),
                 "high": float(r.high),
                 "low": float(r.low),
-                "close": float(r.close),
-                "ema_50": float(r.ema_50) if r.ema_50 is not None else None
+                "close": float(r.close)
             })
             
         return rates
@@ -92,86 +100,81 @@ def fetch_last_candles_from_db(engine, pair: str, limit: int = 250) -> Optional[
     except Exception as e:
         return None
 
-# ---------- LOGIQUE DE DÉTECTION (50% / i-1) ----------
+# ---------- LOGIQUE DE DÉTECTION (EMA 200 / FIBO 61.8) ----------
 
-def check_fvg_volatility(rates: List[Dict[str, Any]], i: int, threshold: float) -> tuple[bool, bool, float, float]:
-    if i < STDEV_PERIOD + 2: return False, False, 0.0, 0.0
-    h_i_2 = rates[i-2]["high"]; l_i_2 = rates[i-2]["low"]
-    h_i = rates[i]["high"]; l_i = rates[i]["low"]
-    
-    raw_bull_cond = (h_i_2 < l_i)
-    raw_bear_cond = (l_i_2 > h_i)
-    
-    if not raw_bull_cond and not raw_bear_cond: return False, False, 0.0, 0.0
-    
-    subset = rates[i - STDEV_PERIOD - 2: i + 1]
-    lows = [r["low"] for r in subset]; highs = [r["high"] for r in subset]
-    
-    diffs = []
-    for k in range(2, len(lows)):
-        gap = abs(lows[k] - highs[k-2])
-        diffs.append(gap)
-        
-    recent_diffs = diffs[-STDEV_PERIOD:]
-    try:
-        volatility = statistics.stdev(recent_diffs)
-    except statistics.StatisticsError: return False, False, 0.0, 0.0
-    
-    if volatility == 0: volatility = 1.0e-9 
-    
-    is_bullish = False; is_bearish = False; score = 0.0; current_gap = 0.0
-    
-    if raw_bull_cond:
-        current_gap = l_i - h_i_2
-        score = current_gap / volatility
-        if score > threshold: is_bullish = True
-    elif raw_bear_cond:
-        current_gap = l_i_2 - h_i
-        score = current_gap / volatility
-        if score > threshold: is_bearish = True
-        
-    return is_bullish, is_bearish, score, current_gap
+def identify_swings(rates: List[Dict[str, Any]], lag: int) -> tuple[List[bool], List[bool]]:
+    is_sh = [False] * len(rates)
+    is_sl = [False] * len(rates)
+    for i in range(lag, len(rates) - lag):
+        if rates[i]['high'] == max(r['high'] for r in rates[i-lag : i+lag+1]):
+            is_sh[i] = True
+        if rates[i]['low'] == min(r['low'] for r in rates[i-lag : i+lag+1]):
+            is_sl[i] = True
+    return is_sh, is_sl
 
 def detect_setup_on_last_candle(rates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    i = len(rates) - 1
-    ema50 = rates[i]["ema_50"]
-    if ema50 is None: return None
-
-    is_bull_stdev, is_bear_stdev, score, current_gap = check_fvg_volatility(rates, i, STDEV_THRESHOLD)
-    if not is_bull_stdev and not is_bear_stdev: return None
-    if score > STDEV_MAX: return None
-
-    h_i_2 = rates[i-2]["high"]; l_i_2 = rates[i-2]["low"]
-    h_i_1 = rates[i-1]["high"]; l_i_1 = rates[i-1]["low"] 
-    h_i = rates[i]["high"];      l_i = rates[i]["low"]
-
-    ema_ok = False
+    if len(rates) < EMA_TREND_PERIOD + 20: return None
+    
+    # Calcul EMA 200 (Brain - Corrigé pour matcher Pandas)
+    closes = [r['close'] for r in rates]
+    ema_200 = calculate_ema_pandas_style(closes, EMA_TREND_PERIOD)
+    
+    curr = rates[-1]
+    is_uptrend = curr['close'] > ema_200
+    is_downtrend = curr['close'] < ema_200
+    
+    # Identification Swings avec Lag (Vision)
+    is_sh, is_sl = identify_swings(rates, SWING_CONFIRMATION_LAG)
+    vision_limit = len(rates) - 1 - SWING_CONFIRMATION_LAG
+    
     entry_side = ""
     entry_price = 0.0
     sl_price = 0.0
 
-    if is_bull_stdev:
-        entry_side = "LONG"
-        fvg_high = l_i; fvg_low = h_i_2
-        entry_price = (fvg_high + fvg_low) / 2.0
-        sl_price = l_i_1
-        if entry_price > ema50 and sl_price < entry_price: ema_ok = True
+    if is_uptrend:
+        sh_idx = -1
+        for k in range(vision_limit, vision_limit - 60, -1):
+            if is_sh[k]: sh_idx = k; break
+        if sh_idx == -1: return None
+        sl_idx = -1
+        for k in range(sh_idx - 1, sh_idx - 100, -1):
+            if is_sl[k]: sl_idx = k; break
+        if sl_idx == -1: return None
         
-    elif is_bear_stdev:
-        entry_side = "SHORT"
-        fvg_high = l_i_2; fvg_low = h_i
-        entry_price = (fvg_high + fvg_low) / 2.0
-        sl_price = h_i_1
-        if entry_price < ema50 and sl_price > entry_price: ema_ok = True
+        high_p = rates[sh_idx]['high']
+        low_p = rates[sl_idx]['low']
+        fib_lvl = high_p - ((high_p - low_p) * FIB_RETREACEMENT)
+        if fib_lvl > ema_200 and curr['close'] > fib_lvl:
+            entry_side = "LONG"
+            entry_price = fib_lvl
+            sl_price = low_p
 
-    if not ema_ok: return None
+    elif is_downtrend:
+        sl_idx = -1
+        for k in range(vision_limit, vision_limit - 60, -1):
+            if is_sl[k]: sl_idx = k; break
+        if sl_idx == -1: return None
+        sh_idx = -1
+        for k in range(sl_idx - 1, sl_idx - 100, -1):
+            if is_sh[k]: sh_idx = k; break
+        if sh_idx == -1: return None
+        
+        low_p = rates[sl_idx]['low']
+        high_p = rates[sh_idx]['high']
+        fib_lvl = low_p + ((high_p - low_p) * FIB_RETREACEMENT)
+        if fib_lvl < ema_200 and curr['close'] < fib_lvl:
+            entry_side = "SHORT"
+            entry_price = fib_lvl
+            sl_price = high_p
+
+    if not entry_side: return None
     
     return {
         "side": entry_side,
         "entry_price": entry_price,
         "sl_price": sl_price,
-        "stdev_score": score,
-        "ts": rates[i]["time"] 
+        "stdev_score": 0.0, # Gardé pour compatibilité header
+        "ts": rates[-1]["time"] 
     }
 
 # ---------- EXÉCUTION MT5 & AUDIT ----------
@@ -192,22 +195,16 @@ def get_lot_size(symbol: str, entry: float, sl: float, risk_percent: float, bala
     lots = round(lots / step) * step
     return max(lots, symbol_info.volume_min)
 
-# --- NOUVELLE FONCTION : GESTION EXPIRATION MANUELLE ---
 def check_and_clean_expired_orders(symbol: str):
     orders = mt5.orders_get(symbol=symbol, magic=MAGIC_NUMBER)
     if not orders: return
-
     last_tick = mt5.symbol_info_tick(symbol)
-    if last_tick is None:
-        return
-        
+    if last_tick is None: return
     server_time = last_tick.time 
     max_duration_sec = TIMEFRAME_MT5_MIN * 60 * MAX_WAIT_CANDLES
-
     for order in orders:
         order_age_sec = server_time - order.time_setup
         order_age_min = int(order_age_sec / 60)
-        
         if order_age_sec > max_duration_sec:
             print(f"⌛ [EXPIRATION] Ordre {symbol} trop vieux ({order_age_min} min). Suppression...")
             request = {
@@ -216,15 +213,11 @@ def check_and_clean_expired_orders(symbol: str):
                 "magic": MAGIC_NUMBER
             }
             res = mt5.order_send(request)
-            if res.retcode != mt5.TRADE_RETCODE_DONE:
-                 print(f"⚠️ Echec suppression ordre {order.ticket}: {res.comment}")
 
 def place_mt5_order(symbol: str, setup: Dict[str, Any]):
     check_and_clean_expired_orders(symbol)
-    
     positions = mt5.positions_get(symbol=symbol)
     if positions and len(positions) > 0: return
-
     orders = mt5.orders_get(symbol=symbol)
     if orders:
         for order in orders:
@@ -239,7 +232,6 @@ def place_mt5_order(symbol: str, setup: Dict[str, Any]):
 
     entry = setup['entry_price']; sl = setup['sl_price']
     dist_sl = abs(entry - sl)
-    
     if setup['side'] == "LONG":
         tp = entry + (dist_sl * DEFAULT_RR)
         order_type = mt5.ORDER_TYPE_BUY_LIMIT
@@ -250,36 +242,29 @@ def place_mt5_order(symbol: str, setup: Dict[str, Any]):
     scale = symbol_info.digits
     entry = qround(entry, scale); sl = qround(sl, scale); tp = qround(tp, scale)
     lots = get_lot_size(symbol, entry, sl, RISK_PERCENT, account_info.balance)
-    
-    if lots == 0:
-        print(f"❌ {symbol}: Impossible de calculer les lots (SL trop court ou erreur data).")
-        return
+    if lots == 0: return
 
-    # --- CALCUL DES FRAIS (AUDIT) ---
     comm_cost_currency = lots * ESTIMATED_COMM_PER_LOT
-    total_frais = comm_cost_currency
     risk_monetaire = account_info.balance * RISK_PERCENT
-    ratio_frais = (total_frais / risk_monetaire) * 100 if risk_monetaire > 0 else 0
+    ratio_frais = (comm_cost_currency / risk_monetaire) * 100 if risk_monetaire > 0 else 0
 
     print("\n" + "="*60)
     print(f"📢 SETUP DÉTECTÉ: {symbol} ({setup['side']})")
     print("-" * 60)
-    print(f"   Entry : {entry}  |  SL : {sl}  |  TP : {tp}")
-    print(f"   Risk  : {risk_monetaire:.2f} USD (approx)")
-    print(f"   Lots  : {lots}")
+    print(f"    Entry : {entry}  |  SL : {sl}  |  TP : {tp}")
+    print(f"    Risk  : {risk_monetaire:.2f} USD (approx)")
+    print(f"    Lots  : {lots}")
     print("-" * 60)
-    print(f"   📊 AUDIT FRAIS (COMMISSION ONLY) :")
-    print(f"   Coût Comm.     : {comm_cost_currency:.2f} USD")
-    print(f"   ---------------------------")
+    print(f"    📊 AUDIT FRAIS (COMMISSION ONLY) :")
+    print(f"    Coût Comm.     : {comm_cost_currency:.2f} USD")
+    print(f"    ---------------------------")
     
-    # MODIFICATION ICI : Blocage si > 15%
     if ratio_frais > 50:
-        print(f"   IMPACT / RISK : {ratio_frais:.2f}%  🔴 BLOQUÉ (Frais > 50%)")
+        print(f"    IMPACT / RISK : {ratio_frais:.2f}%  🔴 BLOQUÉ (Frais > 50%)")
         print("="*60 + "\n")
         return
     else:
-        print(f"   IMPACT / RISK : {ratio_frais:.2f}%  🟢 OK")
-    
+        print(f"    IMPACT / RISK : {ratio_frais:.2f}%  🟢 OK")
     print("="*60 + "\n")
 
     request = {
@@ -290,11 +275,9 @@ def place_mt5_order(symbol: str, setup: Dict[str, Any]):
         "price": float(entry),
         "sl": float(sl),
         "tp": float(tp),
-        "deviation": 20,
         "magic": MAGIC_NUMBER,
         "comment": ORDER_COMMENT,
-        "type_time": mt5.ORDER_TIME_GTC, 
-        "expiration": 0,                 
+        "type_time": mt5.ORDER_TIME_GTC,                 
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
     
@@ -311,48 +294,28 @@ def main():
     if not mt5.initialize():
         print("[FATAL] MT5 Init failed")
         sys.exit(1)
-    
     try:
         engine = get_pg_engine()
         print("✅ DB Connected.")
     except Exception as e:
-        print(f"[FATAL] DB Connection failed: {e}")
         sys.exit(1)
 
     pairs = []
-    files_to_try = ["session_pairs_e8markets.txt", "pairs.txt"]
-    filename = ""
-    for fn in files_to_try:
-        if os.path.exists(fn):
-            filename = fn
-            break
-    if not filename:
-        print("❌ Aucun fichier de paires trouvé.")
-        sys.exit(1)
-
+    filename = "pairs_e8markets.txt" if os.path.exists("session_pairs_e8markets.txt") else "pairs.txt"
     try:
         with open(filename, "r", newline="", encoding="utf-8") as f:
             raw_lines = [line.strip() for line in f if line.strip()]
         for line in raw_lines:
-            if "," in line:
-                parts = line.split(",")
-                p = parts[-1].strip()
-            else:
-                p = line.strip()
+            p = line.split(",")[-1].strip()
             if "pair" not in p.lower() and "type" not in p.lower():
                 pairs.append(p)
     except Exception as e:
-        print(f"Erreur lecture fichier paires: {e}")
         sys.exit(1)
 
-    if not pairs:
-        print(f"Aucune paire valide.")
-        sys.exit(1)
-
-    print(f"🚀 Bot LIVE 30m lancé | Risk: {RISK_PERCENT*100}% | Pairs: {len(pairs)}")
-    print(f"Stratégie: Entry 50% FVG | SL i-1 | TF: {TIMEFRAME_STR}")
+    print(f"🚀 Bot LIVE 15m lancé | Risk: {RISK_PERCENT*100}% | Pairs: {len(pairs)}")
+    print(f"Stratégie: EMA 200 + FIB 61.8 | TF: {TIMEFRAME_STR}")
     print(f"Audit Frais: ACTIF (Comm: {ESTIMATED_COMM_PER_LOT} / lot)")
-    print(f"⚠️ Expiration Gérée par Script (Le broker refuse l'expiration auto).")
+    print(f"⚠️ Expiration Gérée par Script.")
 
     last_printed_ts = 0
     processed_setups = {}
@@ -366,28 +329,21 @@ def main():
                     last_db_ts = ref_rates[-1]['time']
                     if last_db_ts != last_printed_ts:
                         db_time_str = datetime.fromtimestamp(last_db_ts/1000, tz=timezone.utc).strftime('%H:%M')
-                        print(f"\n--- 🕰️ DERNIÈRE DATA EN BASE ({ref_pair}) : {db_time_str} UTC ---")
+                        print(f"\n--- 🕰️ DERNIÈRE DATA EN BASE ({ref_pair}) : {db_time_str} UTC --------------------------------------------------------------------")
                         last_printed_ts = last_db_ts
             
             for pair in pairs:
                 check_and_clean_expired_orders(pair)
-                rates = fetch_last_candles_from_db(engine, pair, limit=STDEV_PERIOD + 10)
+                rates = fetch_last_candles_from_db(engine, pair, limit=1000)
                 if not rates: continue
-                
                 setup = detect_setup_on_last_candle(rates)
-                
                 if setup:
-                    last_processed_ts = processed_setups.get(pair)
-                    current_setup_ts = setup['ts']
-                    
-                    if last_processed_ts != current_setup_ts:
+                    if processed_setups.get(pair) != setup['ts']:
                         place_mt5_order(pair, setup)
-                        processed_setups[pair] = current_setup_ts
-            
-            time.sleep(5)
+                        processed_setups[pair] = setup['ts']
+            time.sleep(10)
 
     except KeyboardInterrupt:
-        print("\nArrêt.")
         mt5.shutdown()
 
 if __name__ == "__main__":
