@@ -17,8 +17,8 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 # ---------- CONFIGURATION ----------
-TIMEFRAME_STR = "15m"          # Adapté pour la nouvelle stratégie
-TIMEFRAME_MT5_MIN = 15
+TIMEFRAME_STR = "5m"           # Adapté pour la nouvelle stratégie (M5)
+TIMEFRAME_MT5_MIN = 5
 MAGIC_NUMBER = 888888
 ORDER_COMMENT = "GoldenTrend"
 
@@ -26,16 +26,20 @@ ORDER_COMMENT = "GoldenTrend"
 ESTIMATED_COMM_PER_LOT = 5.0 
 
 # Paramètres Stratégie Golden Trend
-MAX_WAIT_CANDLES = 32         # 8 heures en 15m
+MAX_WAIT_CANDLES = 32         # Expiration
 EMA_TREND_PERIOD = 200
 FIB_RETREACEMENT = 0.618
 SWING_CONFIRMATION_LAG = 5 
 STDEV_PERIOD = 200            # Gardé pour compatibilité structurelle
 
 DEFAULT_RR = 2.0              # Mis à jour pour la nouvelle stratégie
-RISK_PERCENT = 0.0005          # 1% par trade
+RISK_PERCENT = 0.0005         # 0.05% par trade (Exemple)
 STDEV_THRESHOLD = 0.5
 STDEV_MAX = 1.0
+
+# --- FILTRES DE DIRECTION (NOUVEAU) ---
+ALLOW_LONGS = True    # Mettre à False pour interdire les achats
+ALLOW_SHORTS = False   # Mettre à False pour interdire les ventes
 
 # ---------- CONNEXION BDD ----------
 
@@ -112,7 +116,7 @@ def identify_swings(rates: List[Dict[str, Any]], lag: int) -> tuple[List[bool], 
             is_sl[i] = True
     return is_sh, is_sl
 
-def detect_setup_on_last_candle(rates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def detect_setup_on_last_candle(rates: List[Dict[str, Any]], allow_longs: bool, allow_shorts: bool) -> Optional[Dict[str, Any]]:
     if len(rates) < EMA_TREND_PERIOD + 20: return None
     
     # Calcul EMA 200 (Brain - Corrigé pour matcher Pandas)
@@ -131,7 +135,8 @@ def detect_setup_on_last_candle(rates: List[Dict[str, Any]]) -> Optional[Dict[st
     entry_price = 0.0
     sl_price = 0.0
 
-    if is_uptrend:
+    # --- LOGIQUE LONG (Si autorisé) ---
+    if allow_longs and is_uptrend:
         sh_idx = -1
         for k in range(vision_limit, vision_limit - 60, -1):
             if is_sh[k]: sh_idx = k; break
@@ -149,7 +154,8 @@ def detect_setup_on_last_candle(rates: List[Dict[str, Any]]) -> Optional[Dict[st
             entry_price = fib_lvl
             sl_price = low_p
 
-    elif is_downtrend:
+    # --- LOGIQUE SHORT (Si autorisé) ---
+    elif allow_shorts and is_downtrend:
         sl_idx = -1
         for k in range(vision_limit, vision_limit - 60, -1):
             if is_sl[k]: sl_idx = k; break
@@ -256,7 +262,7 @@ def place_mt5_order(symbol: str, setup: Dict[str, Any]):
     print(f"    Lots  : {lots}")
     print("-" * 60)
     print(f"    📊 AUDIT FRAIS (COMMISSION ONLY) :")
-    print(f"    Coût Comm.     : {comm_cost_currency:.2f} USD")
+    print(f"    Coût Comm.      : {comm_cost_currency:.2f} USD")
     print(f"    ---------------------------")
     
     if ratio_frais > 50:
@@ -301,7 +307,7 @@ def main():
         sys.exit(1)
 
     pairs = []
-    filename = "pairs_e8markets.txt" if os.path.exists("session_pairs_e8markets.txt") else "pairs.txt"
+    filename = "session_pairs_e8markets.txt" if os.path.exists("session_pairs_e8markets.txt") else "pairs.txt"
     try:
         with open(filename, "r", newline="", encoding="utf-8") as f:
             raw_lines = [line.strip() for line in f if line.strip()]
@@ -312,8 +318,9 @@ def main():
     except Exception as e:
         sys.exit(1)
 
-    print(f"🚀 Bot LIVE 15m lancé | Risk: {RISK_PERCENT*100}% | Pairs: {len(pairs)}")
+    print(f"🚀 Bot LIVE {TIMEFRAME_STR} lancé | Risk: {RISK_PERCENT*100}% | Pairs: {len(pairs)}")
     print(f"Stratégie: EMA 200 + FIB 61.8 | TF: {TIMEFRAME_STR}")
+    print(f"DIRECTIONS : LONG={'✅' if ALLOW_LONGS else '❌'} | SHORT={'✅' if ALLOW_SHORTS else '❌'}")
     print(f"Audit Frais: ACTIF (Comm: {ESTIMATED_COMM_PER_LOT} / lot)")
     print(f"⚠️ Expiration Gérée par Script.")
 
@@ -336,7 +343,8 @@ def main():
                 check_and_clean_expired_orders(pair)
                 rates = fetch_last_candles_from_db(engine, pair, limit=1000)
                 if not rates: continue
-                setup = detect_setup_on_last_candle(rates)
+                # Passage des paramètres de direction ici
+                setup = detect_setup_on_last_candle(rates, ALLOW_LONGS, ALLOW_SHORTS)
                 if setup:
                     if processed_setups.get(pair) != setup['ts']:
                         place_mt5_order(pair, setup)

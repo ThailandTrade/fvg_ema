@@ -27,12 +27,16 @@ UTC = timezone.utc
 DATE_FORMAT = "%Y-%m-%d"
 
 # ---------- CONFIG DE TRADING (PARAMETRES ICI) ----------
-DEFAULT_RR = Decimal("1.5")
+DEFAULT_RR = Decimal("2.0")
 MAX_WAIT_CANDLES = 32
 SCAN_TF = "5m"            # Unité de temps pour la détection du setup
 EXECUTION_TF_SUFFIX = "1m" # Timeframe pour l'exécution précise
 DEFAULT_RISK_PER_TRADE = Decimal("0.002")
-DEFAULT_FEES_PCT = Decimal("0.15") # 5% de frais par trade (calculé sur le risque 1R)
+DEFAULT_FEES_PCT = Decimal("0.1") # 5% de frais par trade (calculé sur le risque 1R)
+
+# --- FILTRES DE DIRECTION (Par défaut) ---
+DEFAULT_ALLOW_LONG = True
+DEFAULT_ALLOW_SHORT = False
 
 # --- PARAMETRES DE LA NOUVELLE STRATEGIE ---
 EMA_TREND_PERIOD = 200
@@ -259,10 +263,10 @@ def run_ltf_simulation_memory(ltf_data: List[Dict[str, Any]], start_index: int, 
 
 # --- DÉTECTION DE SETUP (ADAPTÉ POUR EMA 200 + FIBO 61.8) ---
 
-def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_threshold: float, stdev_max: float) -> Optional[Dict[str, Any]]:
+def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_threshold: float, stdev_max: float, allow_longs: bool, allow_shorts: bool) -> Optional[Dict[str, Any]]:
     """
     Détection de la stratégie EMA 200 + Fibonacci 61.8% (OTE).
-    On garde le nom de fonction detect_fvg_setup pour garder la compatibilité avec ton main original.
+    Prend maintenant en compte les booléens de direction.
     """
     # 1. On ne peut rien voir au-delà du lag de confirmation de 5 bougies
     vision_limit = i - SWING_CONFIRMATION_LAG
@@ -276,7 +280,7 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
     is_downtrend = curr['close'] < ema
 
     # --- RECHERCHE LONG ---
-    if is_uptrend:
+    if allow_longs and is_uptrend:
         # Trouver dernier Swing High Confirmé
         sh_idx = -1
         for k in range(vision_limit, vision_limit - 60, -1):
@@ -305,7 +309,7 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
             }
 
     # --- RECHERCHE SHORT ---
-    elif is_downtrend:
+    elif allow_shorts and is_downtrend:
         # Trouver dernier Swing Low Confirmé
         sl_idx = -1
         for k in range(vision_limit, vision_limit - 60, -1):
@@ -337,7 +341,7 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
 
 # ---------- LOGIQUE DE BACKTESTING PRINCIPALE (Inchangée) ----------
 
-def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_threshold: float, start_ms: Optional[int], end_ms: Optional[int], risk_per_trade: Decimal, stdev_max: float, fees_pct: Decimal) -> List[Dict[str, Any]]:
+def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_threshold: float, start_ms: Optional[int], end_ms: Optional[int], risk_per_trade: Decimal, stdev_max: float, fees_pct: Decimal, allow_longs: bool, allow_shorts: bool) -> List[Dict[str, Any]]:
     
     # 1. CHARGEMENT HTF (15m) avec PANDAS
     rates = fetch_htf_data_pandas(engine, pair, SCAN_TF, start_ms, end_ms)
@@ -408,7 +412,7 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
             continue
         
         # --- 1. DÉTECTION DU SETUP (EMA 200 + FIBO) ---
-        setup = detect_fvg_setup(rates, i, scale, stdev_threshold, stdev_max)
+        setup = detect_fvg_setup(rates, i, scale, stdev_threshold, stdev_max, allow_longs, allow_shorts)
         
         if setup:
             stop_loss_risk = abs(setup["entry_price"] - setup["sl_price"])
@@ -431,8 +435,8 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
 
             # --- EXECUTION EN MÉMOIRE ---
             result, exit_ts = run_ltf_simulation_memory(
-                ltf_data,           
-                ltf_start_idx,      
+                ltf_data,            
+                ltf_start_idx,       
                 entry=float(setup["entry_price"]), 
                 sl=float(setup["sl_price"]), 
                 tp=float(tp_price), 
@@ -666,6 +670,44 @@ def display_daily_breakdown(all_trades_log: Dict[str, List[Dict[str, Any]]]):
     print("="*50 + "\n")
 
 
+def display_side_breakdown(all_trades_log: Dict[str, List[Dict[str, Any]]]):
+    long_stats = {'wins': 0, 'losses': 0, 'total': 0}
+    short_stats = {'wins': 0, 'losses': 0, 'total': 0}
+    has_trades = False
+    
+    for pair, trades in all_trades_log.items():
+        for trade in trades:
+            has_trades = True
+            result = trade['result']
+            side = trade['side']
+            
+            if side == "LONG":
+                long_stats['total'] += 1
+                if result == "WIN": long_stats['wins'] += 1
+                elif result == "LOSS": long_stats['losses'] += 1
+            elif side == "SHORT":
+                short_stats['total'] += 1
+                if result == "WIN": short_stats['wins'] += 1
+                elif result == "LOSS": short_stats['losses'] += 1
+                
+    if not has_trades: return
+
+    print("\n" + "="*60)
+    print(" ⚖️ LONG / SHORT BREAKDOWN")
+    print("="*60)
+    print("| {:^10} | {:^8} | {:^8} | {:^8} | {:^10} |".format("SIDE", "TRADES", "WINS", "LOSSES", "WIN RATE"))
+    print("|" + "-"*12 + "|" + "-"*10 + "|" + "-"*10 + "|" + "-"*10 + "|" + "-"*12 + "|")
+    
+    # Calc Long WR
+    l_wr = (long_stats['wins'] / long_stats['total'] * 100) if long_stats['total'] > 0 else 0.0
+    print("| {:<10} | {:^8} | {:^8} | {:^8} | {:>9.2f}% |".format("LONG", long_stats['total'], long_stats['wins'], long_stats['losses'], l_wr))
+    
+    # Calc Short WR
+    s_wr = (short_stats['wins'] / short_stats['total'] * 100) if short_stats['total'] > 0 else 0.0
+    print("| {:<10} | {:^8} | {:^8} | {:^8} | {:>9.2f}% |".format("SHORT", short_stats['total'], short_stats['wins'], short_stats['losses'], s_wr))
+    print("="*60 + "\n")
+
+
 def get_asset_type(pair: str) -> str:
     p_up = pair.upper()
     if any(k in p_up for k in ['BTC', 'ETH', 'BNB', 'ADA', 'XRP', 'SOL', 'LTC', 'BCH']): return "CRYPTO"
@@ -737,7 +779,17 @@ def main():
     ap.add_argument("--end-date", type=str, default=None)
     ap.add_argument("--risk", type=Decimal, default=DEFAULT_RISK_PER_TRADE)
     ap.add_argument("--fees", type=Decimal, default=DEFAULT_FEES_PCT)
+    # --- NOUVEAUX ARGUMENTS ---
+    ap.add_argument("--no-long", action="store_true", help="Forcer la désactivation des trades LONG")
+    ap.add_argument("--no-short", action="store_true", help="Forcer la désactivation des trades SHORT")
+    
     args = ap.parse_args()
+    
+    # --- LOGIQUE CORRIGÉE ---
+    # On prend la valeur par défaut (celle que tu modifies en haut du fichier)
+    # ET on applique l'interdiction si l'argument est présent.
+    allow_longs = DEFAULT_ALLOW_LONG and (not args.no_long)
+    allow_shorts = DEFAULT_ALLOW_SHORT and (not args.no_short)
     
     start_ms = parse_date_to_ms(args.start_date) if args.start_date else None
     end_ms = parse_date_to_ms(args.end_date, is_end_date=True) if args.end_date else None
@@ -746,19 +798,24 @@ def main():
     if not pairs: sys.exit(1)
         
     print(f"Lancement du Backtest (TF: {SCAN_TF}, RR: {args.rr}, RISK: {args.risk * Decimal(100)}%)")
+    print(f"DIRECTIONS AUTORISÉES -> LONG: {allow_longs} | SHORT: {allow_shorts}")
     
     all_trades_log: Dict[str, List[Dict[str, Any]]] = {} 
 
     for p in pairs:
         base, quote = p[:3], p[3:]
         scale = price_scale(base, quote)
-        trade_log = execute_backtest(engine, p, args.rr, scale, 0.0, start_ms, end_ms, args.risk, 0.0, args.fees)
+        trade_log = execute_backtest(
+            engine, p, args.rr, scale, 0.0, start_ms, end_ms, args.risk, 0.0, args.fees,
+            allow_longs=allow_longs, allow_shorts=allow_shorts 
+        )
         all_trades_log[p] = trade_log 
             
     display_trade_details(all_trades_log, show_all=SHOW_ALL_TRADES)
     display_summary_table(args.rr, 0.0, args.risk, 0.0, GLOBAL_RESULTS)
     display_hourly_breakdown(all_trades_log)
     display_daily_breakdown(all_trades_log)
+    display_side_breakdown(all_trades_log)
     display_keepers_csv(GLOBAL_RESULTS)
     display_portfolio_simulation(all_trades_log, INITIAL_BALANCE, args.risk)
 

@@ -1,3 +1,2 @@
 type,pair
-FOREX,XAUUSD.c
 FOREX,XAGUSD.c
