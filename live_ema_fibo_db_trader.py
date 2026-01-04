@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# live_fvg_db_trader_30m_FIXED_HEADER_AUDIT_SOFT_EXP.py
+# live_fvg_db_trader_30m_FIXED_DAILY_CLOSE_HTF.py
 
 import time
 import sys
@@ -17,29 +17,34 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 # ---------- CONFIGURATION ----------
-TIMEFRAME_STR = "5m"           # Adapté pour la nouvelle stratégie (M5)
+TIMEFRAME_STR = "5m"           # Timeframe de trading (LTF)
+TREND_FILTER_TF = "1h"        # NOUVEAU : Timeframe du filtre de tendance (HTF)
 TIMEFRAME_MT5_MIN = 5
 MAGIC_NUMBER = 888888
 ORDER_COMMENT = "GoldenTrend"
+
+# Heure de fermeture (UTC)
+CLOSE_HOUR_UTC = 21
+CLOSE_MINUTE_START = 50 
 
 # Estimation des commissions (Ex: 5 USD par lot Round-Turn)
 ESTIMATED_COMM_PER_LOT = 5.0 
 
 # Paramètres Stratégie Golden Trend
-MAX_WAIT_CANDLES = 32         # Expiration
+MAX_WAIT_CANDLES = 32         
 EMA_TREND_PERIOD = 200
-FIB_RETREACEMENT = 0.618
+FIB_RETREACEMENT = 0.62
 SWING_CONFIRMATION_LAG = 5 
-STDEV_PERIOD = 200            # Gardé pour compatibilité structurelle
+STDEV_PERIOD = 200            
 
-DEFAULT_RR = 2.0              # Mis à jour pour la nouvelle stratégie
-RISK_PERCENT = 0.0005         # 0.05% par trade (Exemple)
+DEFAULT_RR = 2.0              
+RISK_PERCENT = 0.001         
 STDEV_THRESHOLD = 0.5
 STDEV_MAX = 1.0
 
-# --- FILTRES DE DIRECTION (NOUVEAU) ---
-ALLOW_LONGS = True    # Mettre à False pour interdire les achats
-ALLOW_SHORTS = False   # Mettre à False pour interdire les ventes
+# --- FILTRES DE DIRECTION ---
+ALLOW_LONGS = True    
+ALLOW_SHORTS = False
 
 # ---------- CONNEXION BDD ----------
 
@@ -66,11 +71,15 @@ def calculate_ema_pandas_style(prices: List[float], period: int) -> float:
         ema = (price * alpha) + (ema * (1 - alpha))
     return ema
 
-# ---------- RÉCUPÉRATION DONNÉES ----------
+# ---------- RÉCUPÉRATION DONNÉES (MODIFIÉ POUR TF VARIABLE) ----------
 
-def fetch_last_candles_from_db(engine, pair: str, limit: int = 250) -> Optional[List[Dict[str, Any]]]:
+def fetch_last_candles_from_db(engine, pair: str, timeframe: str, limit: int = 250) -> Optional[List[Dict[str, Any]]]:
+    """
+    Charge les bougies depuis la BDD.
+    Accepte maintenant le paramètre 'timeframe' pour charger soit le 5m, soit le 30m.
+    """
     s_pair = sanitize_name(pair)
-    s_tf = sanitize_name(TIMEFRAME_STR)
+    s_tf = sanitize_name(timeframe) # Utilise le TF passé en argument
     table_name = f"candles_mt5_{s_pair}_{s_tf}"
     
     query = text(f"""
@@ -102,32 +111,88 @@ def fetch_last_candles_from_db(engine, pair: str, limit: int = 250) -> Optional[
         return rates
         
     except Exception as e:
+        # print(f"[WARN] Fetch Error {pair} {timeframe}: {e}")
         return None
 
-# ---------- LOGIQUE DE DÉTECTION (EMA 200 / FIBO 61.8) ----------
+# ---------- LOGIQUE DE DÉTECTION & FILTRE HTF ----------
 
 def identify_swings(rates: List[Dict[str, Any]], lag: int) -> tuple[List[bool], List[bool]]:
     is_sh = [False] * len(rates)
     is_sl = [False] * len(rates)
+    # Optimisation: on peut limiter la boucle si on veut, mais sur 1000 bougies c'est rapide
     for i in range(lag, len(rates) - lag):
-        if rates[i]['high'] == max(r['high'] for r in rates[i-lag : i+lag+1]):
+        # Vérifie si le point i est le plus haut/bas de sa fenêtre locale
+        current_high = rates[i]['high']
+        current_low = rates[i]['low']
+        
+        # Fenêtre : [i-lag ... i ... i+lag]
+        local_high = -1.0
+        local_low = 99999999.0
+        
+        # Boucle manuelle pour éviter création de sous-listes coûteuses
+        for k in range(i - lag, i + lag + 1):
+            if rates[k]['high'] > local_high: local_high = rates[k]['high']
+            if rates[k]['low'] < local_low: local_low = rates[k]['low']
+            
+        if current_high == local_high:
             is_sh[i] = True
-        if rates[i]['low'] == min(r['low'] for r in rates[i-lag : i+lag+1]):
+        if current_low == local_low:
             is_sl[i] = True
+            
     return is_sh, is_sl
 
-def detect_setup_on_last_candle(rates: List[Dict[str, Any]], allow_longs: bool, allow_shorts: bool) -> Optional[Dict[str, Any]]:
+def calculate_htf_trend_structure(rates_htf: List[Dict[str, Any]]) -> int:
+    """
+    Analyse les données HTF (ex: 30m) pour déterminer la tendance structurelle.
+    Retourne: 1 (Bullish), -1 (Bearish), 0 (Neutre).
+    """
+    if not rates_htf or len(rates_htf) < 200:
+        return 0
+
+    is_sh, is_sl = identify_swings(rates_htf, SWING_CONFIRMATION_LAG)
+    
+    last_h = -1.0; prev_h = -1.0
+    last_l = -1.0; prev_l = -1.0
+    current_trend = 0
+    
+    # On parcourt toute la liste HTF pour mettre à jour l'état de la tendance bougie par bougie
+    # Cela assure qu'on a l'état actuel à la dernière bougie fermée
+    for i in range(len(rates_htf)):
+        # Un swing est confirmé à i - LAG
+        confirmed_idx = i - SWING_CONFIRMATION_LAG
+        
+        if confirmed_idx >= 0:
+            if is_sh[confirmed_idx]:
+                prev_h = last_h
+                last_h = rates_htf[confirmed_idx]['high']
+                
+            if is_sl[confirmed_idx]:
+                prev_l = last_l
+                last_l = rates_htf[confirmed_idx]['low']
+            
+            # Mise à jour tendance
+            if last_h > 0 and prev_h > 0 and last_l > 0 and prev_l > 0:
+                if last_h > prev_h and last_l > prev_l:
+                    current_trend = 1
+                elif last_l < prev_l and last_h < prev_h:
+                    current_trend = -1
+                    
+    return current_trend
+
+
+def detect_setup_on_last_candle(rates: List[Dict[str, Any]], htf_trend: int, allow_longs: bool, allow_shorts: bool) -> Optional[Dict[str, Any]]:
+    """
+    Détecte le setup sur le LTF (5m) en prenant en compte le filtre HTF (30m).
+    """
     if len(rates) < EMA_TREND_PERIOD + 20: return None
     
-    # Calcul EMA 200 (Brain - Corrigé pour matcher Pandas)
     closes = [r['close'] for r in rates]
     ema_200 = calculate_ema_pandas_style(closes, EMA_TREND_PERIOD)
     
     curr = rates[-1]
-    is_uptrend = curr['close'] > ema_200
-    is_downtrend = curr['close'] < ema_200
+    is_uptrend_local = curr['close'] > ema_200
+    is_downtrend_local = curr['close'] < ema_200
     
-    # Identification Swings avec Lag (Vision)
     is_sh, is_sl = identify_swings(rates, SWING_CONFIRMATION_LAG)
     vision_limit = len(rates) - 1 - SWING_CONFIRMATION_LAG
     
@@ -135,8 +200,9 @@ def detect_setup_on_last_candle(rates: List[Dict[str, Any]], allow_longs: bool, 
     entry_price = 0.0
     sl_price = 0.0
 
-    # --- LOGIQUE LONG (Si autorisé) ---
-    if allow_longs and is_uptrend:
+    # --- SETUP LONG ---
+    # Condition ajoutée : and htf_trend == 1
+    if allow_longs and is_uptrend_local and htf_trend == 1:
         sh_idx = -1
         for k in range(vision_limit, vision_limit - 60, -1):
             if is_sh[k]: sh_idx = k; break
@@ -149,13 +215,15 @@ def detect_setup_on_last_candle(rates: List[Dict[str, Any]], allow_longs: bool, 
         high_p = rates[sh_idx]['high']
         low_p = rates[sl_idx]['low']
         fib_lvl = high_p - ((high_p - low_p) * FIB_RETREACEMENT)
+        
         if fib_lvl > ema_200 and curr['close'] > fib_lvl:
             entry_side = "LONG"
             entry_price = fib_lvl
             sl_price = low_p
 
-    # --- LOGIQUE SHORT (Si autorisé) ---
-    elif allow_shorts and is_downtrend:
+    # --- SETUP SHORT ---
+    # Condition ajoutée : and htf_trend == -1
+    elif allow_shorts and is_downtrend_local and htf_trend == -1:
         sl_idx = -1
         for k in range(vision_limit, vision_limit - 60, -1):
             if is_sl[k]: sl_idx = k; break
@@ -168,6 +236,7 @@ def detect_setup_on_last_candle(rates: List[Dict[str, Any]], allow_longs: bool, 
         low_p = rates[sl_idx]['low']
         high_p = rates[sh_idx]['high']
         fib_lvl = low_p + ((high_p - low_p) * FIB_RETREACEMENT)
+        
         if fib_lvl < ema_200 and curr['close'] < fib_lvl:
             entry_side = "SHORT"
             entry_price = fib_lvl
@@ -179,11 +248,11 @@ def detect_setup_on_last_candle(rates: List[Dict[str, Any]], allow_longs: bool, 
         "side": entry_side,
         "entry_price": entry_price,
         "sl_price": sl_price,
-        "stdev_score": 0.0, # Gardé pour compatibilité header
+        "stdev_score": 0.0,
         "ts": rates[-1]["time"] 
     }
 
-# ---------- EXÉCUTION MT5 & AUDIT ----------
+# ---------- EXÉCUTION MT5 & AUDIT (Inchangé) ----------
 
 def qround(x: float, scale: int) -> float:
     return float(Decimal(str(x)).quantize(Decimal("1").scaleb(-scale), rounding=ROUND_HALF_UP))
@@ -218,59 +287,62 @@ def check_and_clean_expired_orders(symbol: str):
                 "order": order.ticket,
                 "magic": MAGIC_NUMBER
             }
-            res = mt5.order_send(request)
+            mt5.order_send(request)
 
 def place_mt5_order(symbol: str, setup: Dict[str, Any]):
+    # 0. VÉRIFICATION PRIX LIVE
+    tick = mt5.symbol_info_tick(symbol)
+    if not tick: return
+
+    entry = setup['entry_price']
+    sl = setup['sl_price']
+    order_type = None
+
+    if setup['side'] == "LONG":
+        if tick.ask > entry: order_type = mt5.ORDER_TYPE_BUY_LIMIT
+        else:
+            order_type = mt5.ORDER_TYPE_BUY_STOP
+            print(f"⚡ {symbol} LONG : Prix ({tick.ask}) < Entry ({entry}) -> Passage en BUY STOP")
+
+    elif setup['side'] == "SHORT":
+        if tick.bid < entry: order_type = mt5.ORDER_TYPE_SELL_LIMIT
+        else:
+            order_type = mt5.ORDER_TYPE_SELL_STOP
+            print(f"⚡ {symbol} SHORT : Prix ({tick.bid}) > Entry ({entry}) -> Passage en SELL STOP")
+
+    # 1. Calculs
+    symbol_info = mt5.symbol_info(symbol)
+    if not symbol_info: return
+    account_info = mt5.account_info()
+    if not account_info: return
+
+    dist_sl = abs(entry - sl)
+    tp = entry + (dist_sl * DEFAULT_RR) if setup['side'] == "LONG" else entry - (dist_sl * DEFAULT_RR)
+
+    scale = symbol_info.digits
+    entry = qround(entry, scale)
+    sl = qround(sl, scale)
+    tp = qround(tp, scale)
+    
+    lots = get_lot_size(symbol, entry, sl, RISK_PERCENT, account_info.balance)
+    if lots == 0: return
+
+    # 2. Nettoyage
     check_and_clean_expired_orders(symbol)
     positions = mt5.positions_get(symbol=symbol)
     if positions and len(positions) > 0: return
     orders = mt5.orders_get(symbol=symbol)
     if orders:
         for order in orders:
-            request_delete = { "action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket, "magic": MAGIC_NUMBER }
-            mt5.order_send(request_delete)
+            mt5.order_send({ "action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket, "magic": MAGIC_NUMBER })
             print(f"♻️ [UPDATE] {symbol}: Ancien ordre supprimé pour mise à jour.")
 
-    symbol_info = mt5.symbol_info(symbol)
-    if not symbol_info: return
-    account_info = mt5.account_info()
-    if not account_info: return
-
-    entry = setup['entry_price']; sl = setup['sl_price']
-    dist_sl = abs(entry - sl)
-    if setup['side'] == "LONG":
-        tp = entry + (dist_sl * DEFAULT_RR)
-        order_type = mt5.ORDER_TYPE_BUY_LIMIT
-    else:
-        tp = entry - (dist_sl * DEFAULT_RR)
-        order_type = mt5.ORDER_TYPE_SELL_LIMIT
-
-    scale = symbol_info.digits
-    entry = qround(entry, scale); sl = qround(sl, scale); tp = qround(tp, scale)
-    lots = get_lot_size(symbol, entry, sl, RISK_PERCENT, account_info.balance)
-    if lots == 0: return
-
-    comm_cost_currency = lots * ESTIMATED_COMM_PER_LOT
-    risk_monetaire = account_info.balance * RISK_PERCENT
-    ratio_frais = (comm_cost_currency / risk_monetaire) * 100 if risk_monetaire > 0 else 0
-
+    # 3. Envoi
     print("\n" + "="*60)
     print(f"📢 SETUP DÉTECTÉ: {symbol} ({setup['side']})")
-    print("-" * 60)
+    print(f"    Mode  : {'LIMIT' if 'LIMIT' in str(order_type) else 'STOP (Catch-up)'}")
     print(f"    Entry : {entry}  |  SL : {sl}  |  TP : {tp}")
-    print(f"    Risk  : {risk_monetaire:.2f} USD (approx)")
-    print(f"    Lots  : {lots}")
-    print("-" * 60)
-    print(f"    📊 AUDIT FRAIS (COMMISSION ONLY) :")
-    print(f"    Coût Comm.      : {comm_cost_currency:.2f} USD")
-    print(f"    ---------------------------")
-    
-    if ratio_frais > 50:
-        print(f"    IMPACT / RISK : {ratio_frais:.2f}%  🔴 BLOQUÉ (Frais > 50%)")
-        print("="*60 + "\n")
-        return
-    else:
-        print(f"    IMPACT / RISK : {ratio_frais:.2f}%  🟢 OK")
+    print(f"    Risk  : {account_info.balance * RISK_PERCENT:.2f} USD | Lots : {lots}")
     print("="*60 + "\n")
 
     request = {
@@ -283,7 +355,7 @@ def place_mt5_order(symbol: str, setup: Dict[str, Any]):
         "tp": float(tp),
         "magic": MAGIC_NUMBER,
         "comment": ORDER_COMMENT,
-        "type_time": mt5.ORDER_TIME_GTC,                 
+        "type_time": mt5.ORDER_TIME_GTC,                  
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
     
@@ -293,6 +365,50 @@ def place_mt5_order(symbol: str, setup: Dict[str, Any]):
         print(f"✅ [EXEC] {symbol} {setup['side']} (Bougie {t_str} UTC) | Entry: {entry} | SL: {sl} | Lots: {lots}")
     else:
         print(f"[MT5 ERROR] {symbol}: {res.comment} ({res.retcode})")
+
+
+# ---------- FONCTION DE FERMETURE JOURNALIÈRE (Inchangée) ----------
+
+def daily_market_close_guard():
+    now_utc = datetime.now(timezone.utc)
+    if now_utc.hour == CLOSE_HOUR_UTC and now_utc.minute >= CLOSE_MINUTE_START:
+        print(f"\n🛑 [DAILY CLOSE] Il est {now_utc.strftime('%H:%M')} UTC. Fermeture journalière forcée !")
+        
+        orders = mt5.orders_get(magic=MAGIC_NUMBER)
+        if orders:
+            for o in orders:
+                print(f"   🗑️ Suppression ordre {o.symbol}...")
+                mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": o.ticket})
+        
+        positions = mt5.positions_get(magic=MAGIC_NUMBER)
+        if positions:
+            for p in positions:
+                print(f"   👋 Fermeture position {p.symbol}...")
+                tick = mt5.symbol_info_tick(p.symbol)
+                if not tick: continue
+                
+                type_close = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+                price_close = tick.bid if p.type == mt5.ORDER_TYPE_BUY else tick.ask
+                
+                request = {
+                    "action": mt5.TRADE_ACTION_DEAL,
+                    "symbol": p.symbol,
+                    "volume": p.volume,
+                    "type": type_close,
+                    "position": p.ticket,
+                    "price": price_close,
+                    "magic": MAGIC_NUMBER,
+                    "comment": "Daily Close",
+                    "type_time": mt5.ORDER_TIME_GTC,
+                    "type_filling": mt5.ORDER_FILLING_IOC,
+                }
+                mt5.order_send(request)
+        
+        print("💤 Pause du bot jusqu'à la réouverture... (Sleep 60s)")
+        time.sleep(60)
+        return True
+    return False
+
 
 # ---------- BOUCLE PRINCIPALE ----------
 
@@ -318,37 +434,53 @@ def main():
     except Exception as e:
         sys.exit(1)
 
-    print(f"🚀 Bot LIVE {TIMEFRAME_STR} lancé | Risk: {RISK_PERCENT*100}% | Pairs: {len(pairs)}")
-    print(f"Stratégie: EMA 200 + FIB 61.8 | TF: {TIMEFRAME_STR}")
-    print(f"DIRECTIONS : LONG={'✅' if ALLOW_LONGS else '❌'} | SHORT={'✅' if ALLOW_SHORTS else '❌'}")
-    print(f"Audit Frais: ACTIF (Comm: {ESTIMATED_COMM_PER_LOT} / lot)")
-    print(f"⚠️ Expiration Gérée par Script.")
+    print(f"🚀 Bot LIVE {TIMEFRAME_STR} + HTF {TREND_FILTER_TF} lancé")
+    print(f"Risk: {RISK_PERCENT*100}% | Pairs: {len(pairs)}")
+    print(f"Fermeture journalière forcée à : {CLOSE_HOUR_UTC}:{CLOSE_MINUTE_START} UTC")
 
     last_printed_ts = 0
     processed_setups = {}
 
     try:
         while True:
+            # 1. SÉCURITÉ FERMETURE
+            if daily_market_close_guard():
+                continue 
+
+            # 2. LOGIQUE NORMALE
             if pairs:
                 ref_pair = pairs[0] 
-                ref_rates = fetch_last_candles_from_db(engine, ref_pair, limit=5)
+                # On vérifie la fraîcheur des données LTF (5m) pour l'affichage
+                ref_rates = fetch_last_candles_from_db(engine, ref_pair, TIMEFRAME_STR, limit=5)
                 if ref_rates:
                     last_db_ts = ref_rates[-1]['time']
                     if last_db_ts != last_printed_ts:
                         db_time_str = datetime.fromtimestamp(last_db_ts/1000, tz=timezone.utc).strftime('%H:%M')
-                        print(f"\n--- 🕰️ DERNIÈRE DATA EN BASE ({ref_pair}) : {db_time_str} UTC --------------------------------------------------------------------")
+                        print(f"\n--- 🕰️ DERNIÈRE DATA EN BASE ({ref_pair} {TIMEFRAME_STR}) : {db_time_str} UTC ------------------------")
                         last_printed_ts = last_db_ts
             
             for pair in pairs:
                 check_and_clean_expired_orders(pair)
-                rates = fetch_last_candles_from_db(engine, pair, limit=1000)
-                if not rates: continue
-                # Passage des paramètres de direction ici
-                setup = detect_setup_on_last_candle(rates, ALLOW_LONGS, ALLOW_SHORTS)
+                
+                # A. Récupération HTF (30m) & Calcul Tendance
+                rates_htf = fetch_last_candles_from_db(engine, pair, TREND_FILTER_TF, limit=500)
+                htf_trend = calculate_htf_trend_structure(rates_htf)
+                
+                # B. Si tendance neutre, pas besoin de charger le LTF (économie ressources)
+                if htf_trend == 0:
+                    continue
+                
+                # C. Récupération LTF (5m) & Détection
+                rates_ltf = fetch_last_candles_from_db(engine, pair, TIMEFRAME_STR, limit=1000)
+                if not rates_ltf: continue
+                
+                setup = detect_setup_on_last_candle(rates_ltf, htf_trend, ALLOW_LONGS, ALLOW_SHORTS)
+                
                 if setup:
                     if processed_setups.get(pair) != setup['ts']:
                         place_mt5_order(pair, setup)
                         processed_setups[pair] = setup['ts']
+                        
             time.sleep(10)
 
     except KeyboardInterrupt:

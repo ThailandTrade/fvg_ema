@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# postgres_fvg_backtester_PANDAS_FULL_FINAL_V3.py
+# postgres_fvg_backtester_PANDAS_FULL_FINAL_V4_HTF.py
 
 import os
 import re
@@ -30,8 +30,9 @@ DATE_FORMAT = "%Y-%m-%d"
 DEFAULT_RR = Decimal("2.0")
 MAX_WAIT_CANDLES = 32
 SCAN_TF = "5m"            # Unité de temps pour la détection du setup
+TREND_FILTER_TF = "1h"   # NOUVEAU : Timeframe du filtre de tendance (Option C)
 EXECUTION_TF_SUFFIX = "1m" # Timeframe pour l'exécution précise
-DEFAULT_RISK_PER_TRADE = Decimal("0.002")
+DEFAULT_RISK_PER_TRADE = Decimal("0.001")
 DEFAULT_FEES_PCT = Decimal("0.1") # 5% de frais par trade (calculé sur le risque 1R)
 
 # --- FILTRES DE DIRECTION (Par défaut) ---
@@ -39,9 +40,9 @@ DEFAULT_ALLOW_LONG = True
 DEFAULT_ALLOW_SHORT = True
 
 # --- PARAMETRES DE LA NOUVELLE STRATEGIE ---
-EMA_TREND_PERIOD = 100
+EMA_TREND_PERIOD = 200
 FIB_RETREACEMENT = 0.62
-SWING_CONFIRMATION_LAG = 5
+SWING_CONFIRMATION_LAG = 5 
 
 # --- PARAMETRES DU SUMMARY ---
 INITIAL_BALANCE = Decimal("50000.00") # Capital de départ pour la simulation
@@ -119,21 +120,121 @@ def get_pg_engine():
         sys.exit(1)
 
 
-# --- Fetch Rates (ADAPTÉ POUR EMA 200 & SWINGS SANS LOOKAHEAD) ---
+# --- NOUVEAU : FETCH HTF TREND STRUCTURE (30m) ---
 
-def fetch_htf_data_pandas(engine, pair: str, tf: str, start_ms: Optional[int], end_ms: Optional[int]) -> Optional[List[Dict[str, Any]]]:
+def fetch_trend_structure_data(engine, pair: str, tf: str, start_ms: Optional[int], end_ms: Optional[int]) -> pd.DataFrame:
     """
-    Charge les données HTF (15m) via Pandas et pré-calcule l'EMA 200 et les Swings sans biais de futur.
+    Charge les données du filtre HTF (ex: 30m), calcule les pivots et définit la tendance structurelle.
+    Retourne un DataFrame avec colonnes ['time', 'htf_trend'].
+    htf_trend: 1 (Uptrend), -1 (Downtrend), 0 (Neutre)
+    """
+    table_name = f"candles_mt5_{sanitize_name(pair)}_{sanitize_name(tf)}"
+    query = f"SELECT ts as time, high, low, close FROM {table_name}"
+    conditions = []
+    
+    # Buffer plus large car le HTF est plus lent
+    safe_buffer_ms = timedelta(days=60).total_seconds() * 1000
+    
+    if start_ms is not None:
+        conditions.append(f"ts >= {start_ms - safe_buffer_ms}")
+    if end_ms is not None:
+        conditions.append(f"ts <= {end_ms}")
+        
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY ts ASC"
+
+    try:
+        df = pd.read_sql(query, engine)
+        if df.empty: return pd.DataFrame()
+
+        # --- Détection des Swings ---
+        l = SWING_CONFIRMATION_LAG
+        window_size = 2 * l + 1
+        
+        rolling_max = df['high'].rolling(window=window_size).max()
+        rolling_min = df['low'].rolling(window=window_size).min()
+        
+        # On identifie les swings bruts (à leur place réelle)
+        # Shift(-l) car rolling regarde en arrière, mais le sommet est au milieu
+        # Note: Pandas rolling aligne à droite. Pour centrer: center=True ou shift. 
+        # Ici on garde la logique précédente : max sur window, check si milieu == max
+        
+        df['is_swing_high'] = False
+        df['is_swing_low'] = False
+        
+        # Optimisation vectorisée approximative pour vitesse ou boucle pour précision
+        # On va utiliser une boucle rapide sur les index détectés
+        
+        # Pour faire simple et robuste comme avant:
+        for idx in range(window_size, len(df)):
+            mid_idx = idx - l
+            if df.iloc[mid_idx]['high'] == rolling_max.iloc[idx]:
+                df.at[mid_idx, 'is_swing_high'] = True
+            if df.iloc[mid_idx]['low'] == rolling_min.iloc[idx]:
+                df.at[mid_idx, 'is_swing_low'] = True
+
+        # --- Calcul de la Structure (Option C) avec respect du LAG ---
+        # On itère pour définir la tendance. Attention: un swing n'est "connu" qu'à (index + l)
+        
+        last_h = -1.0; prev_h = -1.0
+        last_l = -1.0; prev_l = -1.0
+        current_trend = 0 # 0: Neutre, 1: Bull, -1: Bear
+        
+        trend_col = np.zeros(len(df), dtype=int)
+        
+        # On convertit en numpy pour itération ultra rapide
+        highs = df['high'].values
+        lows = df['low'].values
+        is_sh = df['is_swing_high'].values
+        is_sl = df['is_swing_low'].values
+        
+        for i in range(len(df)):
+            # 1. Vérifier si un swing a été CONFIRMÉ à cette bougie 'i'
+            # Le swing s'est produit à i - l
+            confirmed_idx = i - l
+            
+            if confirmed_idx >= 0:
+                if is_sh[confirmed_idx]:
+                    prev_h = last_h
+                    last_h = highs[confirmed_idx]
+                    
+                if is_sl[confirmed_idx]:
+                    prev_l = last_l
+                    last_l = lows[confirmed_idx]
+                
+                # 2. Mise à jour de la tendance basée sur les structures connues
+                if last_h > 0 and prev_h > 0 and last_l > 0 and prev_l > 0:
+                    # Higher Highs AND Higher Lows -> Uptrend
+                    if last_h > prev_h and last_l > prev_l:
+                        current_trend = 1
+                    # Lower Lows AND Lower Highs -> Downtrend
+                    elif last_l < prev_l and last_h < prev_h:
+                        current_trend = -1
+                    # Sinon on garde la tendance précédente ou 0 si cassure mixte (range)
+            
+            trend_col[i] = current_trend
+
+        df['htf_trend'] = trend_col
+        return df[['time', 'htf_trend']]
+
+    except Exception as e:
+        print(f"[ERR] Trend Filter Data Error for {pair}: {e}")
+        return pd.DataFrame()
+
+
+# --- Fetch Rates (ADAPTÉ POUR RETOURNER DF POUR MERGE) ---
+
+def fetch_htf_data_pandas_raw(engine, pair: str, tf: str, start_ms: Optional[int], end_ms: Optional[int]) -> pd.DataFrame:
+    """
+    Même logique que l'original mais retourne le DataFrame Pandas brut au lieu d'une liste.
     """
     base, quote = pair[:3], pair[3:]
-    scale = price_scale(base, quote)
     table_name = f"candles_mt5_{sanitize_name(pair)}_{sanitize_name(tf)}"
 
-    # Construction de la requête SQL brute
     query = f"SELECT ts as time, open, high, low, close FROM {table_name}"
     conditions = []
     
-    # Buffer de sécurité pour EMA 200 et Swings (environ 40 jours)
     safe_buffer_ms = timedelta(days=40).total_seconds() * 1000
     
     if start_ms is not None:
@@ -143,32 +244,24 @@ def fetch_htf_data_pandas(engine, pair: str, tf: str, start_ms: Optional[int], e
         
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    
     query += " ORDER BY ts ASC"
 
     try:
-        # Chargement ultra-rapide en DataFrame
         df = pd.read_sql(query, engine)
-        if df.empty:
-            return None
+        if df.empty: return pd.DataFrame()
 
-        # --- CALCULS VECTORISÉS ---
-        
-        # 1. EMA 200
+        # EMA 200
         df['ema_trend'] = df['close'].ewm(span=EMA_TREND_PERIOD, adjust=False).mean()
 
-        # 2. SWINGS SANS TRICHE (DÉTECTION À T-5)
+        # SWINGS
         l = SWING_CONFIRMATION_LAG
         window_size = 2 * l + 1
-        
         rolling_max = df['high'].rolling(window=window_size).max()
         rolling_min = df['low'].rolling(window=window_size).min()
         
         df['is_swing_high'] = False
         df['is_swing_low'] = False
         
-        # On itère pour marquer les points pivots à leur index réel
-        # MAIS ils ne seront accessibles par le scanner qu'avec le lag de vision
         for idx in range(window_size, len(df)):
             mid_idx = idx - l
             if df.iloc[mid_idx]['high'] == rolling_max.iloc[idx]:
@@ -176,78 +269,52 @@ def fetch_htf_data_pandas(engine, pair: str, tf: str, start_ms: Optional[int], e
             if df.iloc[mid_idx]['low'] == rolling_min.iloc[idx]:
                 df.at[mid_idx, 'is_swing_low'] = True
 
-        return df.to_dict('records')
+        return df
 
     except Exception as e:
         print(f"[ERR] Pandas Fetch HTF Error for {pair}/{tf}: {e}")
-        return None
+        return pd.DataFrame()
 
 
-# --- SIMULATION LTF (OPTIMISÉE: CHARGEMENT EN BLOC) ---
+# --- SIMULATION LTF (Inchangée) ---
 
 def fetch_ltf_data_pandas(engine, pair: str, start_ms: int, end_ms: int) -> List[Dict[str, Any]]:
-    """
-    Charge TOUTES les données LTF nécessaires pour la période en une seule fois.
-    Renvoie une liste de dictionnaires pour itération rapide.
-    """
     table_ltf = f"candles_mt5_{sanitize_name(pair)}_{EXECUTION_TF_SUFFIX}"
-    
-    # On ajoute une petite marge de fin pour couvrir le dernier trade potentiel
-    buffer_end = end_ms + (MAX_WAIT_CANDLES * 30 * 60 * 1000 * 2) # Large buffer
-    
+    buffer_end = end_ms + (MAX_WAIT_CANDLES * 30 * 60 * 1000 * 2) 
     query = f"SELECT ts, high, low FROM {table_ltf} WHERE ts >= {start_ms} AND ts <= {buffer_end} ORDER BY ts ASC"
-    
     try:
         df = pd.read_sql(query, engine)
-        if df.empty:
-            return []
-        
-        # On renvoie une liste de dicts, c'est le plus léger à itérer
+        if df.empty: return []
         return df.to_dict('records')
-        
     except Exception as e:
-        # print(f"[WARN] LTF Data missing for {pair}: {e}")
         return []
 
-# --- MODIFICATION ICI : Retour de 3 valeurs (result, real_entry_ts, exit_ts) ---
 def run_ltf_simulation_memory(ltf_data: List[Dict[str, Any]], start_index: int, entry: float, sl: float, tp: float, side: str, expiration_ts: int) -> Tuple[str, int, int]:
-    """
-    Simule le trade en parcourant la liste ltf_data déjà chargée en mémoire.
-    Plus aucune connexion BDD ici !
-    """
     is_open = False
-    real_entry_ts = 0 # Pour stocker l'heure exacte de l'exécution
-    
-    # On parcourt la liste à partir de l'index trouvé par bisect
-    # On met une limite de sécurité (ex: 5000 bougies max à vérifier) pour éviter boucle infinie si bug data
+    real_entry_ts = 0 
     max_steps = 10000 
-    
-    # Itération protégée pour ne pas dépasser la taille de la liste
     end_loop = min(start_index + max_steps, len(ltf_data))
     
     for i in range(start_index, end_loop):
         row = ltf_data[i]
-        ts = row['ts'] # Déjà int
+        ts = row['ts']
         high = float(row['high'])
         low = float(row['low'])
         
-        # 1. TENTATIVE D'ENTRÉE (PENDING)
         if not is_open:
-            if ts > expiration_ts:
-                return "EXPIRED", 0, ts
+            if ts > expiration_ts: return "EXPIRED", 0, ts
             
             if side == "LONG":
                 if low <= entry:
                     is_open = True
-                    real_entry_ts = ts # On capture l'heure exacte
-                    if low <= sl: return "LOSS", real_entry_ts, ts # SL touché sur la minute d'entrée
+                    real_entry_ts = ts
+                    if low <= sl: return "LOSS", real_entry_ts, ts
             elif side == "SHORT":
                 if high >= entry:
                     is_open = True
-                    real_entry_ts = ts # On capture l'heure exacte
-                    if high >= sl: return "LOSS", real_entry_ts, ts # SL touché sur la minute d'entrée
+                    real_entry_ts = ts
+                    if high >= sl: return "LOSS", real_entry_ts, ts
         
-        # 2. GESTION DU TRADE (OPEN)
         if is_open:
             if side == "LONG":
                 if low <= sl: return "LOSS", real_entry_ts, ts
@@ -256,7 +323,6 @@ def run_ltf_simulation_memory(ltf_data: List[Dict[str, Any]], start_index: int, 
                 if high >= sl: return "LOSS", real_entry_ts, ts
                 if low <= tp: return "WIN", real_entry_ts, ts
                 
-    # Si on sort de la boucle (fin des données), on considère expiré
     if ltf_data:
         last_ts = ltf_data[end_loop - 1]['ts']
     else:
@@ -265,34 +331,35 @@ def run_ltf_simulation_memory(ltf_data: List[Dict[str, Any]], start_index: int, 
     return "EXPIRED", 0, last_ts
 
 
-# --- DÉTECTION DE SETUP (ADAPTÉ POUR EMA 200 + FIBO 61.8) ---
+# --- DÉTECTION DE SETUP (MODIFIÉ POUR FILTRE HTF) ---
 
 def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_threshold: float, stdev_max: float, allow_longs: bool, allow_shorts: bool) -> Optional[Dict[str, Any]]:
     """
-    Détection de la stratégie EMA 200 + Fibonacci 61.8% (OTE).
-    Prend maintenant en compte les booléens de direction.
+    Détection Fibo + Filtre HTF Trend (SANS EMA LOCALE).
     """
-    # 1. On ne peut rien voir au-delà du lag de confirmation de 5 bougies
     vision_limit = i - SWING_CONFIRMATION_LAG
     if vision_limit < 200: return None
 
     curr = rates[i]
-    ema = curr.get('ema_trend')
-    if ema is None or pd.isna(ema): return None
+    # ema = curr.get('ema_trend')  <-- ON ENLEVE CA
+    htf_trend = curr.get('htf_trend', 0) 
 
-    is_uptrend = curr['close'] > ema
-    is_downtrend = curr['close'] < ema
+    # On n'a plus besoin de vérifier l'EMA ici
+    # if ema is None or pd.isna(ema): return None <-- ON ENLEVE CA
+
+    # Ces variables ne servent plus car on ne filtre plus par l'EMA locale
+    # is_uptrend_local = curr['close'] > ema
+    # is_downtrend_local = curr['close'] < ema
 
     # --- RECHERCHE LONG ---
-    if allow_longs and is_uptrend:
-        # Trouver dernier Swing High Confirmé
+    # Condition modifiée : on enlève "and is_uptrend_local"
+    if allow_longs and htf_trend == 1:
         sh_idx = -1
         for k in range(vision_limit, vision_limit - 60, -1):
             if rates[k]['is_swing_high']:
                 sh_idx = k; break
         if sh_idx == -1: return None
 
-        # Trouver Swing Low précédent (Début d'impulsion)
         sl_idx = -1
         for k in range(sh_idx - 1, sh_idx - 100, -1):
             if rates[k]['is_swing_low']:
@@ -303,25 +370,25 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
         low_p = rates[sl_idx]['low']
         fib_price = high_p - ((high_p - low_p) * FIB_RETREACEMENT)
 
-        # Filtre : Entrée au dessus de l'EMA & prix actuel > entrée (on attend le retracement)
-        if fib_price > ema and curr['close'] > fib_price:
+        # Filtre modifié : On enlève "fib_price > ema"
+        # On vérifie juste que le prix actuel est au-dessus de l'entrée (on attend le pullback)
+        if curr['close'] > fib_price:
             return {
                 "side": "LONG",
                 "entry_price": qround(fib_price, scale),
                 "sl_price": qround(low_p, scale),
-                "stdev_score": 0.0, "gap_size": 0.0 # Colonnes fantômes pour ton main original
+                "stdev_score": 0.0, "gap_size": 0.0
             }
 
     # --- RECHERCHE SHORT ---
-    elif allow_shorts and is_downtrend:
-        # Trouver dernier Swing Low Confirmé
+    # Condition modifiée : on enlève "and is_downtrend_local"
+    elif allow_shorts and htf_trend == -1:
         sl_idx = -1
         for k in range(vision_limit, vision_limit - 60, -1):
             if rates[k]['is_swing_low']:
                 sl_idx = k; break
         if sl_idx == -1: return None
 
-        # Trouver Swing High précédent
         sh_idx = -1
         for k in range(sl_idx - 1, sl_idx - 100, -1):
             if rates[k]['is_swing_high']:
@@ -332,7 +399,8 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
         high_p = rates[sh_idx]['high']
         fib_price = low_p + ((high_p - low_p) * FIB_RETREACEMENT)
 
-        if fib_price < ema and curr['close'] < fib_price:
+        # Filtre modifié : On enlève "fib_price < ema"
+        if curr['close'] < fib_price:
             return {
                 "side": "SHORT",
                 "entry_price": qround(fib_price, scale),
@@ -342,27 +410,45 @@ def detect_fvg_setup(rates: List[Dict[str, Any]], i: int, scale: int, stdev_thre
 
     return None
 
-
-# ---------- LOGIQUE DE BACKTESTING PRINCIPALE (Inchangée) ----------
+# ---------- LOGIQUE DE BACKTESTING PRINCIPALE (MODIFIÉE POUR MERGE) ----------
 
 def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_threshold: float, start_ms: Optional[int], end_ms: Optional[int], risk_per_trade: Decimal, stdev_max: float, fees_pct: Decimal, allow_longs: bool, allow_shorts: bool) -> List[Dict[str, Any]]:
     
-    # 1. CHARGEMENT HTF (15m) avec PANDAS
-    rates = fetch_htf_data_pandas(engine, pair, SCAN_TF, start_ms, end_ms)
+    # 1. CHARGEMENT DONNÉES SCAN (5m) EN DATAFRAME
+    df_scan = fetch_htf_data_pandas_raw(engine, pair, SCAN_TF, start_ms, end_ms)
+    if df_scan.empty or len(df_scan) < 200: return []
     
-    if not rates or len(rates) < 200: return []
+    # 2. CHARGEMENT DONNÉES FILTRE HTF (30m)
+    df_filter = fetch_trend_structure_data(engine, pair, TREND_FILTER_TF, start_ms, end_ms)
     
-    # Détermination des bornes temporelles réelles des données chargées
+    # 3. FUSION (MERGE) INTELLIGENTE
+    # On utilise merge_asof pour associer la tendance 30m la plus récente à chaque bougie 5m
+    # direction='backward' assure qu'on prend la valeur connue dans le passé ou présent immédiat
+    if not df_filter.empty:
+        df_scan = pd.merge_asof(
+            df_scan.sort_values('time'),
+            df_filter.sort_values('time'),
+            on='time',
+            direction='backward'
+        )
+        # Remplir les NaN (au début avant le premier calcul HTF) par 0 (Neutre)
+        df_scan['htf_trend'] = df_scan['htf_trend'].fillna(0)
+    else:
+        # Si pas de data filter (erreur?), on met tout à 0 (pas de trade) ou on ignore le filtre ?
+        # Ici on met 0, donc aucun trade ne sera pris si le filtre échoue
+        df_scan['htf_trend'] = 0
+
+    # Conversion en liste de dicts pour l'itération existante
+    rates = df_scan.to_dict('records')
+
     data_start_ms = rates[0]['time']
     data_end_ms = rates[-1]['time']
     
-    # 2. CHARGEMENT LTF (1m) EN UNE FOIS
+    # 4. CHARGEMENT LTF (1m)
     ltf_data = fetch_ltf_data_pandas(engine, pair, data_start_ms, data_end_ms)
-    
-    # Création d'une liste de timestamps LTF pour la recherche rapide (bisect)
     ltf_timestamps = [r['ts'] for r in ltf_data]
     
-    # 3. FILTRAGE DE LA PLAGE DE SCAN
+    # 5. FILTRAGE DE LA PLAGE DE SCAN
     start_index = 0
     end_index = len(rates)
     required_seed = 200 
@@ -372,8 +458,7 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
             if rates[idx]['time'] >= start_ms:
                 start_index = idx
                 break
-        else:
-            return []
+        else: return []
 
     if end_ms is not None:
         for idx in range(start_index, len(rates)):
@@ -386,7 +471,6 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
     summary_start_ts = rates[start_index]['time']
     summary_end_ts = rates[end_index - 1]['time']
     
-    # Initialisation R-BASED
     balance_r = Decimal(0)
     total_trades = 0; wins = 0; losses = 0
     peak_r = Decimal(0)
@@ -394,28 +478,24 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
     
     trade_log: List[Dict[str, Any]] = []
     
-    # --- NOUVELLES METRIQUES: SQN & PF ---
-    all_pnl_r = []     # Pour SQN
-    gross_profit_r = Decimal(0) # Pour PF
-    gross_loss_r = Decimal(0)   # Pour PF
+    all_pnl_r = []     
+    gross_profit_r = Decimal(0) 
+    gross_loss_r = Decimal(0)   
     
-    # Calcul de la durée d'une bougie Scan en ms
     scan_duration_ms = rates[1]['time'] - rates[0]['time']
     max_wait_ms = MAX_WAIT_CANDLES * scan_duration_ms
     
-    # Variable pour sauter le scan tant qu'un trade est en cours
     skip_until_ts = 0
 
-    # 4. BOUCLE PRINCIPALE (Itération sur la plage filtrée)
+    # 6. BOUCLE PRINCIPALE
     for i in range(start_index, end_index):
         
         current_ts = rates[i]['time']
         
-        # Si un trade est en cours sur le LTF, on saute les bougies scan
         if current_ts < skip_until_ts:
             continue
         
-        # --- 1. DÉTECTION DU SETUP (EMA 200 + FIBO) ---
+        # --- DÉTECTION DU SETUP (AVEC NOUVEAU FILTRE INTÉGRÉ) ---
         setup = detect_fvg_setup(rates, i, scale, stdev_threshold, stdev_max, allow_longs, allow_shorts)
         
         if setup:
@@ -429,7 +509,6 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
 
             tp_price = qround(target_price, scale)
             
-            # --- 2. EXECUTION LTF SANS LOOK-AHEAD ---
             simulation_start_ts = current_ts + scan_duration_ms
             expiration_ts = simulation_start_ts + max_wait_ms
             ltf_start_idx = bisect.bisect_left(ltf_timestamps, simulation_start_ts)
@@ -437,10 +516,9 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
             if ltf_start_idx >= len(ltf_data):
                 continue
 
-            # --- EXECUTION EN MÉMOIRE (MODIFIÉ POUR RETOURNER L'ENTRY PRÉCISE) ---
             result, real_entry_ts, exit_ts = run_ltf_simulation_memory(
-                ltf_data,            
-                ltf_start_idx,       
+                ltf_data,             
+                ltf_start_idx,        
                 entry=float(setup["entry_price"]), 
                 sl=float(setup["sl_price"]), 
                 tp=float(tp_price), 
@@ -448,7 +526,6 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
                 expiration_ts=expiration_ts
             )
             
-            # --- 3. TRAITEMENT DU RÉSULTAT AVEC FRAIS ---
             if result in ["WIN", "LOSS"]:
                 total_trades += 1
                 
@@ -469,7 +546,6 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
                 
                 trade_log.append({
                     "pair": pair, 
-                    # MODIFICATION : On prend l'heure réelle d'exécution si disponible
                     "entry_time": real_entry_ts if result != "EXPIRED" else rates[i]["time"], 
                     "exit_time": exit_ts,
                     "side": setup["side"], "entry_price": setup["entry_price"], "sl_price": setup["sl_price"],
@@ -477,22 +553,17 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
                     "result": result, "pnl_r": pnl_r
                 })
                 
-                # On ne prend pas de nouveau trade tant que celui-ci n'est pas fini
                 skip_until_ts = exit_ts
-    
-    # --- Collecte des résultats pour le tableau final ---
     
     expectancy_r = balance_r / total_trades if total_trades > 0 else Decimal(0)
     win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
     max_drawdown_percent = max_drawdown_r * risk_per_trade * Decimal("100") 
     
-    # --- CALCUL FINAL PROFIT FACTOR ---
     if gross_loss_r == 0:
         profit_factor = Decimal("99.99") 
     else:
         profit_factor = gross_profit_r / gross_loss_r
         
-    # --- CALCUL FINAL SQN ---
     sqn = 0.0
     if total_trades > 1:
         mean_pnl = statistics.mean(all_pnl_r)
@@ -516,7 +587,7 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
     return trade_log
 
 
-# ---------- FONCTIONS D'AFFICHAGE ----------
+# ---------- FONCTIONS D'AFFICHAGE (Inchangées) ----------
 
 def display_trade_details(all_trades: Dict[str, List[Dict[str, Any]]], show_all: bool = False):
     
@@ -573,7 +644,7 @@ def display_summary_table(rr_ratio: Decimal, stdev_threshold: float, risk_perc: 
     
     
     print("\n" + "="*145)
-    print(f"SUMMARY BACKTEST PANDAS EMA 200 + FIBO 61.8 (TF: {SCAN_TF}, RR: {rr_ratio}R, RISK: {risk_perc*Decimal(100)}%, FEES: {DEFAULT_FEES_PCT*100}%)")
+    print(f"SUMMARY BACKTEST PANDAS EMA 200 + FIBO 61.8 + TREND FILTRE {TREND_FILTER_TF} (TF: {SCAN_TF}, RR: {rr_ratio}R, RISK: {risk_perc*Decimal(100)}%)")
     print("="*145)
     
     header = "| {:^10} | {:^6} | {:^8} | {:^10} | {:^10} | {:^10} | {:^10} | {:^8} | {:^8} |".format(
@@ -793,8 +864,6 @@ def main():
     args = ap.parse_args()
     
     # --- LOGIQUE CORRIGÉE ---
-    # On prend la valeur par défaut (celle que tu modifies en haut du fichier)
-    # ET on applique l'interdiction si l'argument est présent.
     allow_longs = DEFAULT_ALLOW_LONG and (not args.no_long)
     allow_shorts = DEFAULT_ALLOW_SHORT and (not args.no_short)
     
@@ -806,6 +875,7 @@ def main():
         
     print(f"Lancement du Backtest (TF: {SCAN_TF}, RR: {args.rr}, RISK: {args.risk * Decimal(100)}%)")
     print(f"DIRECTIONS AUTORISÉES -> LONG: {allow_longs} | SHORT: {allow_shorts}")
+    print(f"FILTRE HTF ACTIVÉ SUR : {TREND_FILTER_TF}")
     
     all_trades_log: Dict[str, List[Dict[str, Any]]] = {} 
 
