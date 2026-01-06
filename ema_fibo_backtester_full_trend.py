@@ -885,7 +885,7 @@ def main():
         )
         all_trades_log[p] = trade_log 
             
-    #display_trade_details(all_trades_log, show_all=SHOW_ALL_TRADES)
+    display_trade_details(all_trades_log, show_all=SHOW_ALL_TRADES)
     display_summary_table(args.rr, 0.0, args.risk, 0.0, GLOBAL_RESULTS)
     display_hourly_breakdown(all_trades_log)
     display_daily_breakdown(all_trades_log)

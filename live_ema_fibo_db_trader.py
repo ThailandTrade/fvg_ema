@@ -258,17 +258,72 @@ def qround(x: float, scale: int) -> float:
     return float(Decimal(str(x)).quantize(Decimal("1").scaleb(-scale), rounding=ROUND_HALF_UP))
 
 def get_lot_size(symbol: str, entry: float, sl: float, risk_percent: float, balance: float):
-    distance = abs(entry - sl)
-    if distance == 0: return 0.0
+    """
+    Calcul des lots robuste utilisant mt5.order_calc_profit pour gérer
+    correctement les tailles de contrats (XAU, XAG, Indices, Forex).
+    """
+    if entry == sl: return 0.0
+    
     symbol_info = mt5.symbol_info(symbol)
-    if not symbol_info: return 0.0
-    tick_value = symbol_info.trade_tick_value
-    loss_per_lot = (distance / symbol_info.point) * tick_value
-    if loss_per_lot == 0: return 0.0
-    lots = (balance * risk_percent) / loss_per_lot
+    if not symbol_info:
+        print(f"[ERR] Symbol info introuvable pour {symbol}")
+        return 0.0
+
+    # 1. Déterminer le sens pour la simulation (Long ou Short)
+    # Si Entry > SL, c'est un achat (on perd si ça descend).
+    # Si Entry < SL, c'est une vente (on perd si ça monte).
+    if entry > sl:
+        order_type = mt5.ORDER_TYPE_BUY
+    else:
+        order_type = mt5.ORDER_TYPE_SELL
+
+    # 2. Demander à MT5 la perte en devise du compte pour 1.0 LOT standard
+    # Cette fonction gère automatiquement ContractSize (100 pour l'or), TickValue, etc.
+    try:
+        profit_one_lot = mt5.order_calc_profit(order_type, symbol, 1.0, float(entry), float(sl))
+    except Exception as e:
+        print(f"[ERR] Erreur calcul profit MT5: {e}")
+        return 0.0
+
+    # Si la fonction échoue ou renvoie None (ex: marché fermé ou data manquante)
+    if profit_one_lot is None:
+        # TENTATIVE DE FALLBACK (Calcul manuel 'Contract Size')
+        # Pour XAUUSD/USD, Loss = Distance * ContractSize
+        print(f"[WARN] Fallback calcul manuel pour {symbol}")
+        loss_per_lot_absolute = abs(entry - sl) * symbol_info.trade_contract_size
+    else:
+        # profit_one_lot est négatif car c'est une perte, on prend l'absolu
+        loss_per_lot_absolute = abs(profit_one_lot)
+
+    if loss_per_lot_absolute == 0:
+        return 0.0
+
+    # 3. Calcul du volume
+    risk_amount = balance * risk_percent
+    raw_lots = risk_amount / loss_per_lot_absolute
+
+    # 4. Normalisation (Step, Min, Max)
     step = symbol_info.volume_step
-    lots = round(lots / step) * step
-    return max(lots, symbol_info.volume_min)
+    min_vol = symbol_info.volume_min
+    max_vol = symbol_info.volume_max
+
+    # Arrondi au step près (ex: 0.01)
+    lots = round(raw_lots / step) * step
+    
+    # Sécurité finale
+    if lots < min_vol: 
+        # Si le risque calculé est inférieur au lot min, on retourne 0 (ou min_vol si tu es agressif)
+        # Ici on retourne min_vol pour ne pas bloquer les trades sur petits comptes, 
+        # mais attention le risque sera > risk_percent.
+        return float(min_vol) 
+        
+    if lots > max_vol: 
+        lots = max_vol
+
+    # Debug optionnel pour vérifier dans la console
+    # print(f"DEBUG {symbol}: Risk=${risk_amount:.2f} | Loss/1Lot=${loss_per_lot_absolute:.2f} -> Lots Calc: {lots}")
+
+    return float(lots)
 
 def check_and_clean_expired_orders(symbol: str):
     orders = mt5.orders_get(symbol=symbol, magic=MAGIC_NUMBER)
@@ -456,7 +511,7 @@ def main():
                     last_db_ts = ref_rates[-1]['time']
                     if last_db_ts != last_printed_ts:
                         db_time_str = datetime.fromtimestamp(last_db_ts/1000, tz=timezone.utc).strftime('%H:%M')
-                        print(f"\n--- 🕰️ DERNIÈRE DATA EN BASE ({ref_pair} {TIMEFRAME_STR}) : {db_time_str} UTC ------------------------")
+                        print(f"\n--- 🕰️ DERNIÈRE DATA EN BASE ({ref_pair} {TIMEFRAME_STR}) : {db_time_str} UTC -----------------------------------------------------------------")
                         last_printed_ts = last_db_ts
             
             for pair in pairs:
