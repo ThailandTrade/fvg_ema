@@ -456,7 +456,7 @@ def main():
                 for tf in tfs:
                     fetch_and_store(engine, p, tf, user_to_ms, now_srv)
 
-            time.sleep(5)
+            time.sleep(1)
 
     except KeyboardInterrupt:
         print("[STOP] User interrupt.")

@@ -1,0 +1,56 @@
+{
+  "XAUUSD": {
+    "state": "INSIDE",
+    "swing_extreme": 4710.12,
+    "breakout_time": "2026-02-02T02:03:00+00:00",
+    "breakout_price": 4715.63,
+    "current_session": "TOKYO",
+    "last_trade_candle_ts": 1769991780000,
+    "last_candle_ts": 1769997840000
+  },
+  "JP225.cash": {
+    "state": "INSIDE",
+    "swing_extreme": 0.0,
+    "breakout_time": null,
+    "breakout_price": null,
+    "current_session": null,
+    "last_trade_candle_ts": 0,
+    "last_candle_ts": 1769997840000
+  },
+  "UK100.cash": {
+    "state": "INSIDE",
+    "swing_extreme": 0.0,
+    "breakout_time": null,
+    "breakout_price": null,
+    "current_session": null,
+    "last_trade_candle_ts": 0,
+    "last_candle_ts": 1769997840000
+  },
+  "GER40.cash": {
+    "state": "BREAKOUT_DOWN",
+    "swing_extreme": 24362.76,
+    "breakout_time": "2026-02-02T01:16:00+00:00",
+    "breakout_price": 24431.26,
+    "current_session": "TOKYO",
+    "last_trade_candle_ts": 1769994300000,
+    "last_candle_ts": 1769997840000
+  },
+  "US30.cash": {
+    "state": "BREAKOUT_DOWN",
+    "swing_extreme": 48688.01,
+    "breakout_time": "2026-02-02T01:46:00+00:00",
+    "breakout_price": 48773.01,
+    "current_session": "TOKYO",
+    "last_trade_candle_ts": 0,
+    "last_candle_ts": 1769997840000
+  },
+  "XAUAUD": {
+    "state": "INSIDE",
+    "swing_extreme": 0.0,
+    "breakout_time": null,
+    "breakout_price": null,
+    "current_session": null,
+    "last_trade_candle_ts": 0,
+    "last_candle_ts": 1769997840000
+  }
+}

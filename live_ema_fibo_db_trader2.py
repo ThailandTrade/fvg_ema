@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# live_fvg_db_trader_WEEKEND_CLOSE_ONLY_NO_EXPIRY.py
+# live_fvg_db_trader_V8_STRICT_FULL_FIX.py
 
 import time
 import sys
@@ -10,15 +10,15 @@ import re
 import csv
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 
 # BDD
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 # ---------- CONFIGURATION ----------
-TIMEFRAME_STR = "5m"           # Timeframe de trading (LTF)
-TREND_FILTER_TF = "1h"         # Timeframe du filtre de tendance (HTF)
+TIMEFRAME_STR = "5m"            # Timeframe de trading (LTF)
+TREND_FILTER_TF = "5m"          # Strict Backtest
 TIMEFRAME_MT5_MIN = 5
 MAGIC_NUMBER = 888888
 ORDER_COMMENT = "GoldenTrend"
@@ -31,20 +31,20 @@ CLOSE_MINUTE_START = 50
 ESTIMATED_COMM_PER_LOT = 5.0 
 
 # Paramètres Stratégie Golden Trend
-MAX_WAIT_CANDLES = 64          
+MAX_WAIT_CANDLES = 72           # Strict Backtest
 EMA_TREND_PERIOD = 200
 FIB_RETREACEMENT = 0.62
 SWING_CONFIRMATION_LAG = 5 
-STDEV_PERIOD = 200             
+STDEV_PERIOD = 200              
 
-DEFAULT_RR = 2.0               
-RISK_PERCENT = 0.0005          
+DEFAULT_RR = 3.0                # Strict Backtest
+RISK_PERCENT = 0.0005           # Strict Backtest
 STDEV_THRESHOLD = 0.5
 STDEV_MAX = 1.0
 
 # --- FILTRES DE DIRECTION ---
 ALLOW_LONGS = True    
-ALLOW_SHORTS = True
+ALLOW_SHORTS = False
 
 # ---------- CONNEXION BDD ----------
 
@@ -70,6 +70,36 @@ def calculate_ema_pandas_style(prices: List[float], period: int) -> float:
     for price in prices[period:]:
         ema = (price * alpha) + (ema * (1 - alpha))
     return ema
+
+# ---------- PARSING FICHIER ----------
+
+def parse_pairs_with_rr(filename: str) -> List[Tuple[str, float]]:
+    pairs_data = []
+    if not os.path.exists(filename): return []
+
+    try:
+        with open(filename, "r", newline="", encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip()]
+            
+        for line in lines:
+            if line.lower().startswith("pair") or line.lower().startswith("type"): continue
+            
+            parts = line.split(',')
+            p_name = parts[0].strip()
+            rr_val = float(DEFAULT_RR)
+            
+            if len(parts) >= 2:
+                try:
+                    rr_val = float(parts[1].strip())
+                    p_name = parts[0].strip()
+                except ValueError:
+                    p_name = parts[1].strip() # Format Type,Pair
+            
+            p_name = p_name.replace(" ", "")
+            if p_name:
+                pairs_data.append((p_name, rr_val))
+    except: pass
+    return pairs_data
 
 # ---------- RÉCUPÉRATION DONNÉES ----------
 
@@ -281,29 +311,77 @@ def get_lot_size(symbol: str, entry: float, sl: float, risk_percent: float, bala
 
     return float(lots)
 
-def check_and_clean_expired_orders(symbol: str):
+def manage_existing_orders(symbol: str, rates: List[Dict[str, Any]]):
+    """
+    Gestion Stricte : 
+    1. Si Position Active -> On bloque (return True).
+    2. Si Ordre Pending -> On gère (Timeout / Invalidation) et On bloque (return True).
+    Retourne True si le symbole est "occupé" (Position ou Ordre en cours).
+    """
+    
+    # 1. CHECK POSITIONS (Trade en cours)
+    positions = mt5.positions_get(symbol=symbol, magic=MAGIC_NUMBER)
+    if positions:
+        # Trade actif -> On ne fait rien, on ne cherche pas de setup.
+        return True
+
+    # 2. CHECK PENDING ORDERS
     orders = mt5.orders_get(symbol=symbol, magic=MAGIC_NUMBER)
-    if not orders: return
+    if not orders: 
+        return False # Rien du tout, voie libre
+
+    # Ici, on a des ordres pending, donc on est "occupé".
+    # On en profite pour vérifier leur validité (Invalidation EMA / Timeout)
+    
+    if not rates: return True # Pas de data, mais ordres présents -> on bloque
+    
     last_tick = mt5.symbol_info_tick(symbol)
-    if last_tick is None: return
-    server_time = last_tick.time 
+    server_time = last_tick.time if last_tick else time.time()
     max_duration_sec = TIMEFRAME_MT5_MIN * 60 * MAX_WAIT_CANDLES
+    
+    curr_close = rates[-1]['close']
+    ema_200 = calculate_ema_pandas_style([r['close'] for r in rates], EMA_TREND_PERIOD)
+    
     for order in orders:
+        # A. Timeout check
         order_age_sec = server_time - order.time_setup
         order_age_min = int(order_age_sec / 60)
+        
         if order_age_sec > max_duration_sec:
             print(f"⌛ [EXPIRATION] Ordre {symbol} trop vieux ({order_age_min} min). Suppression...")
-            request = {
-                "action": mt5.TRADE_ACTION_REMOVE,
-                "order": order.ticket,
-                "magic": MAGIC_NUMBER
-            }
-            mt5.order_send(request)
+            mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket, "magic": MAGIC_NUMBER})
+            continue
 
-def place_mt5_order(symbol: str, setup: Dict[str, Any]):
+        # B. Invalidation EMA Check
+        invalidated = False
+        if order.type in (mt5.ORDER_TYPE_BUY_LIMIT, mt5.ORDER_TYPE_BUY_STOP):
+             if curr_close < ema_200: invalidated = True
+        elif order.type in (mt5.ORDER_TYPE_SELL_LIMIT, mt5.ORDER_TYPE_SELL_STOP):
+             if curr_close > ema_200: invalidated = True
+             
+        if invalidated:
+            print(f"💀 [INVALIDATION] Ordre {symbol} annulé (Close vs EMA). Suppression...")
+            mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket, "magic": MAGIC_NUMBER})
+            continue
+            
+    # Quoi qu'il arrive, si on avait des ordres (même s'ils viennent d'être supprimés dans ce tick),
+    # on considère ce cycle comme "occupé" pour éviter de renvoyer un ordre instantanément sur la même bougie.
+    return True
+
+def place_mt5_order(symbol: str, setup: Dict[str, Any], rr_ratio: float):
     # 0. VÉRIFICATION PRIX LIVE
     tick = mt5.symbol_info_tick(symbol)
     if not tick: return
+
+    # --- AJOUT CRITIQUE : FILTRE SPREAD ---
+    spread = tick.ask - tick.bid
+    dist_entry_sl = abs(setup['entry_price'] - setup['sl_price'])
+    # Si le spread représente plus de 25% de la distance du SL, c'est trop risqué (Scalping/Illiquide)
+    # Cela évite de se faire exécuter instantanément au mauvais prix
+    if dist_entry_sl > 0 and spread > (dist_entry_sl * 0.25):
+        print(f"⚠️ [SPREAD WARNING] {symbol}: Spread ({spread:.5f}) > 25% du SL ({dist_entry_sl:.5f}). ABORT.")
+        return
+    # --------------------------------------
 
     entry = setup['entry_price']
     sl = setup['sl_price']
@@ -328,7 +406,8 @@ def place_mt5_order(symbol: str, setup: Dict[str, Any]):
     if not account_info: return
 
     dist_sl = abs(entry - sl)
-    tp = entry + (dist_sl * DEFAULT_RR) if setup['side'] == "LONG" else entry - (dist_sl * DEFAULT_RR)
+    # MODIFICATION : UTILISATION DU RR DYNAMIQUE
+    tp = entry + (dist_sl * rr_ratio) if setup['side'] == "LONG" else entry - (dist_sl * rr_ratio)
 
     scale = symbol_info.digits
     entry = qround(entry, scale)
@@ -338,19 +417,9 @@ def place_mt5_order(symbol: str, setup: Dict[str, Any]):
     lots = get_lot_size(symbol, entry, sl, RISK_PERCENT, account_info.balance)
     if lots == 0: return
 
-    # 2. Nettoyage
-    check_and_clean_expired_orders(symbol)
-    positions = mt5.positions_get(symbol=symbol)
-    if positions and len(positions) > 0: return
-    orders = mt5.orders_get(symbol=symbol)
-    if orders:
-        for order in orders:
-            mt5.order_send({ "action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket, "magic": MAGIC_NUMBER })
-            print(f"♻️ [UPDATE] {symbol}: Ancien ordre supprimé pour mise à jour.")
-
     # 3. Envoi (MODE GTC SANS EXPIRATION)
     print("\n" + "="*60)
-    print(f"📢 SETUP DÉTECTÉ: {symbol} ({setup['side']})")
+    print(f"📢 SETUP DÉTECTÉ: {symbol} ({setup['side']}) [RR: {rr_ratio}]")
     print(f"    Mode  : {'LIMIT' if 'LIMIT' in str(order_type) else 'STOP (Catch-up)'}")
     print(f"    Entry : {entry}  |  SL : {sl}  |  TP : {tp}")
     print(f"    Risk  : {account_info.balance * RISK_PERCENT:.2f} USD | Lots : {lots}")
@@ -434,32 +503,27 @@ def main():
     except Exception as e:
         sys.exit(1)
 
-    pairs = []
     filename = "session_pairs_e8markets.txt" if os.path.exists("session_pairs_e8markets.txt") else "pairs.txt"
-    try:
-        with open(filename, "r", newline="", encoding="utf-8") as f:
-            raw_lines = [line.strip() for line in f if line.strip()]
-        for line in raw_lines:
-            p = line.split(",")[-1].strip()
-            if "pair" not in p.lower() and "type" not in p.lower():
-                pairs.append(p)
-    except Exception as e:
-        sys.exit(1)
+    pairs_data = parse_pairs_with_rr(filename)
+    
+    pairs = [p[0] for p in pairs_data]
 
     print(f"🚀 Bot LIVE {TIMEFRAME_STR} + HTF {TREND_FILTER_TF} lancé")
     print(f"Risk: {RISK_PERCENT*100}% | Pairs: {len(pairs)}")
     print(f"Fermeture forcée : VENDREDI à {CLOSE_HOUR_UTC}:{CLOSE_MINUTE_START} UTC")
 
     last_printed_ts = 0
-    processed_setups = {}
+    # processed_setups = {} # REMPLACÉ PAR LA LOGIQUE PLUS ROBUSTE CI-DESSOUS
+    
+    # DICTIONNAIRE MEMOIRE ANTI-MITRAILLAGE
+    # Cle: Pair, Valeur: Timestamp de la bougie où on a déjà tenté un trade
+    last_trade_candle_ts = {} 
 
     try:
         while True:
-            # 1. SÉCURITÉ FERMETURE VENDREDI SEULEMENT
             if daily_market_close_guard():
                 continue 
 
-            # 2. LOGIQUE NORMALE
             if pairs:
                 ref_pair = pairs[0] 
                 ref_rates = fetch_last_candles_from_db(engine, ref_pair, TIMEFRAME_STR, limit=5)
@@ -470,24 +534,39 @@ def main():
                         print(f"\n--- 🕰️ DERNIÈRE DATA EN BASE ({ref_pair} {TIMEFRAME_STR}) : {db_time_str} UTC -----------------------------------------------------------------")
                         last_printed_ts = last_db_ts
             
-            for pair in pairs:
-                check_and_clean_expired_orders(pair)
+            for pair, specific_rr in pairs_data:
                 
-                rates_htf = fetch_last_candles_from_db(engine, pair, TREND_FILTER_TF, limit=500)
+                # Fetch data nécessaire pour management ET detection
+                # CORRECTIF 1: Limit augmentée à 5000 pour convergence EMA
+                rates_ltf = fetch_last_candles_from_db(engine, pair, TIMEFRAME_STR, limit=5000)
+                if not rates_ltf: continue
+
+                # CORRECTIF 2 : ANTI-MITRAILLAGE
+                # Si le timestamp de la dernière bougie est le même que celui où on a déjà tradé -> ON PASSE
+                current_ts = rates_ltf[-1]['time']
+                if last_trade_candle_ts.get(pair) == current_ts:
+                    continue 
+
+                # GESTION STRICTE : Position ou Pending -> On passe
+                if manage_existing_orders(pair, rates_ltf):
+                    continue
+                
+                # CORRECTIF 1 (Suite): Limit augmentée à 3000 pour convergence Trend
+                rates_htf = fetch_last_candles_from_db(engine, pair, TREND_FILTER_TF, limit=3000)
                 htf_trend = calculate_htf_trend_structure(rates_htf)
                 
                 if htf_trend == 0:
                     continue
                 
-                rates_ltf = fetch_last_candles_from_db(engine, pair, TIMEFRAME_STR, limit=1000)
-                if not rates_ltf: continue
-                
                 setup = detect_setup_on_last_candle(rates_ltf, htf_trend, ALLOW_LONGS, ALLOW_SHORTS)
                 
                 if setup:
-                    if processed_setups.get(pair) != setup['ts']:
-                        place_mt5_order(pair, setup)
-                        processed_setups[pair] = setup['ts']
+                    # Plus besoin de verifier processed_setups car last_trade_candle_ts bloque tout en amont
+                    rr_to_use = specific_rr if specific_rr is not None else DEFAULT_RR
+                    place_mt5_order(pair, setup, rr_to_use)
+                    
+                    # CORRECTIF 2 : On marque la bougie comme "traitée"
+                    last_trade_candle_ts[pair] = current_ts
                         
             time.sleep(10)
 

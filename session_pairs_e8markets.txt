@@ -1,3 +1,4 @@
-type,pair
-COMMODITIES,XAGUSD.c
-COMMODITIES,XAUUSD.c
+pair,rr
+XAUUSD,2.0
+JP225.cash,1.0
+GER40.cash,1.0

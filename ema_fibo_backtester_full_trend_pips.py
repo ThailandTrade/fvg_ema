@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# postgres_fvg_backtester_PANDAS_FULL_FINAL_V4_HTF.py
+# postgres_fvg_backtester_PANDAS_FULL_FINAL_V4_HTF_STRICT.py
 
 import os
 import re
@@ -27,17 +27,17 @@ UTC = timezone.utc
 DATE_FORMAT = "%Y-%m-%d"
 
 # ---------- CONFIG DE TRADING (PARAMETRES ICI) ----------
-DEFAULT_RR = Decimal("2.0")
-MAX_WAIT_CANDLES = 32
+DEFAULT_RR = Decimal("3.0")
+MAX_WAIT_CANDLES = 72
 SCAN_TF = "5m"            # Unité de temps pour la détection du setup
-TREND_FILTER_TF = "1h"   # NOUVEAU : Timeframe du filtre de tendance (Option C)
+TREND_FILTER_TF = "5m"   # NOUVEAU : Timeframe du filtre de tendance (Option C)
 EXECUTION_TF_SUFFIX = "1m" # Timeframe pour l'exécution précise
 DEFAULT_RISK_PER_TRADE = Decimal("0.001")
 DEFAULT_FEES_PCT = Decimal("0.0") # 5% de frais par trade (calculé sur le risque 1R)
 
 # --- FILTRES DE DIRECTION (Par défaut) ---
 DEFAULT_ALLOW_LONG = True
-DEFAULT_ALLOW_SHORT = True
+DEFAULT_ALLOW_SHORT = False
 
 # --- PARAMETRES DE LA NOUVELLE STRATEGIE ---
 EMA_TREND_PERIOD = 200
@@ -457,7 +457,7 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
     
     trade_log: List[Dict[str, Any]] = []
     
-    all_pnl_r = []     
+    all_pnl_r = []      
     gross_profit_r = Decimal(0) 
     gross_loss_r = Decimal(0)   
     
@@ -487,6 +487,32 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
 
             tp_price = qround(target_price, scale)
             
+            # --- NOUVEAU : INVALIDATION EMA SUR TF 5M ---
+            invalidated_ema_5m = False
+            for wait_idx in range(1, MAX_WAIT_CANDLES + 1):
+                check_idx = i + wait_idx
+                if check_idx >= len(rates): break
+                
+                check_candle = rates[check_idx]
+                check_ema = check_candle['ema_trend']
+                
+                # Invalidation : Clôture du mauvais côté de l'EMA sur le 5min
+                if setup["side"] == "LONG" and check_candle['close'] < check_ema:
+                    invalidated_ema_5m = True
+                    skip_until_ts = check_candle['time']
+                    break
+                if setup["side"] == "SHORT" and check_candle['close'] > check_ema:
+                    invalidated_ema_5m = True
+                    skip_until_ts = check_candle['time']
+                    break
+                
+                # Si l'entrée est touchée sur le low/high de la bougie 5m, on stoppe le scan d'invalidation
+                if setup["side"] == "LONG" and check_candle['low'] <= float(setup["entry_price"]): break
+                if setup["side"] == "SHORT" and check_candle['high'] >= float(setup["entry_price"]): break
+
+            if invalidated_ema_5m:
+                continue
+
             simulation_start_ts = current_ts + scan_duration_ms
             expiration_ts = simulation_start_ts + max_wait_ms
             ltf_start_idx = bisect.bisect_left(ltf_timestamps, simulation_start_ts)
@@ -531,7 +557,7 @@ def execute_backtest(engine, pair: str, rr_ratio: Decimal, scale: int, stdev_thr
                     "result": result, "pnl_r": pnl_r
                 })
                 
-                skip_until_ts = exit_ts
+            skip_until_ts = exit_ts
     
     expectancy_r = balance_r / total_trades if total_trades > 0 else Decimal(0)
     win_rate = (wins / total_trades) * 100 if total_trades > 0 else 0
@@ -967,7 +993,7 @@ def main():
         )
         all_trades_log[p] = trade_log 
             
-    display_trade_details(all_trades_log, show_all=SHOW_ALL_TRADES)
+    #display_trade_details(all_trades_log, show_all=SHOW_ALL_TRADES)
     display_summary_table(args.rr, 0.0, args.risk, 0.0, GLOBAL_RESULTS)
     display_hourly_breakdown(all_trades_log)
     display_daily_breakdown(all_trades_log)
