@@ -74,7 +74,7 @@ ASSETS = [
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'JP225.cash',
         'mt5_symbol': 'JP225.cash',
         'candle_table': 'candles_mt5_jp225_cash_1m',
@@ -87,7 +87,7 @@ ASSETS = [
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': True},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'UK100.cash',
         'mt5_symbol': 'UK100.cash',
         'candle_table': 'candles_mt5_uk100_cash_1m',
@@ -100,7 +100,7 @@ ASSETS = [
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'GER40.cash',
         'mt5_symbol': 'GER40.cash',
         'candle_table': 'candles_mt5_ger40_cash_1m',
@@ -113,7 +113,7 @@ ASSETS = [
         'sessions': {'TOKYO': True, 'LONDON': False, 'NY': True},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'US30.cash',
         'mt5_symbol': 'US30.cash',
         'candle_table': 'candles_mt5_us30_cash_1m',
@@ -123,10 +123,10 @@ ASSETS = [
         'allow_long': True,
         'allow_short': False,
         'sl_offset': 0.10,
-        'sessions': {'TOKYO': True, 'LONDON': True, 'NY': False},
+        'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'XAUAUD',
         'mt5_symbol': 'XAUAUD',
         'candle_table': 'candles_mt5_xauaud_1m',
@@ -794,8 +794,8 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                 if TP_MODE == "POC":
                     tp = poc
                     actual_rr = (close - tp) / risk if risk > 0 else 0
-                    # Filtre RR > 30 (comme backtest)
-                    if actual_rr > 30:
+                    # Filtre RR aberrant (comme backtest: > 10)
+                    if actual_rr > 10:
                         result['event'] = "FILTERED_RR_ABERRANT"
                         result['event_details'] = f"RR={actual_rr:.1f}"
                         asset_state.state = "INSIDE"
@@ -883,7 +883,13 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                 if TP_MODE == "POC":
                     tp = poc
                     actual_rr = (tp - close) / risk if risk > 0 else 0
-                    # PAS de filtre RR > 30 pour LONG (comme backtest)
+                    # Filtre RR aberrant (comme backtest: > 10)
+                    if actual_rr > 10:
+                        result['event'] = "FILTERED_RR_ABERRANT"
+                        result['event_details'] = f"RR={actual_rr:.1f}"
+                        asset_state.state = "INSIDE"
+                        result['state_after'] = "INSIDE"
+                        return result
                 else:
                     tp = close + (risk * TARGET_RR)
                     actual_rr = TARGET_RR

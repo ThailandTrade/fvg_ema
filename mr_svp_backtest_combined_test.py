@@ -16,9 +16,9 @@ load_dotenv()
 # CONFIGURATION MULTI-ASSETS
 # =============================================================================
 
-START_DATE_STR = "2026-02-02 00:00:00"
+START_DATE_STR = "2026-02-04 00:00:00"
 INITIAL_CAPITAL = 50000.0
-RISK_PERCENT = 0.0025
+RISK_PERCENT = 0.004
 
 TP_MODE = "POC"
 TARGET_RR = 3.0
@@ -44,6 +44,11 @@ SHOW_LAST_TRADES = True      # Activer/désactiver l'affichage détaillé
 LAST_TRADES_COUNT = 10       # Nombre de trades à afficher
 
 # =============================================================================
+# AFFICHAGE DES TRADES EN COURS (NON CLOS)
+# =============================================================================
+SHOW_OPEN_TRADES = False      # Activer/désactiver l'affichage des trades ouverts
+
+# =============================================================================
 # CONFIGURATION DES HEURES DE SESSION (UTC)
 # =============================================================================
 SESSIONS_CONFIG = {
@@ -60,61 +65,67 @@ ASSETS = [
         'tick_table': 'market_ticks_xauusd',
         'tick_size': 0.01,
         'va_percent': 0.70,
+        'sl_offset': 0.10,  # Offset SL au-delà du swing extreme
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'JP225.cash',
         'candle_table': 'candles_mt5_jp225_cash_1m',
         'tick_table': 'market_ticks_jp225',
         'tick_size': 1.0,
         'va_percent': 0.70,
+        'sl_offset': 1.0,  # 1 point pour indices
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': True},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'UK100.cash',
         'candle_table': 'candles_mt5_uk100_cash_1m',
         'tick_table': 'market_ticks_uk100',
         'tick_size': 1.0,
         'va_percent': 0.70,
+        'sl_offset': 1.0,
         'allow_long': False,
         'allow_short': True,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'GER40.cash',
         'candle_table': 'candles_mt5_ger40_cash_1m',
         'tick_table': 'market_ticks_ger40',
         'tick_size': 0.01,
         'va_percent': 0.70,
+        'sl_offset': 1.0,
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': False, 'NY': True},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'US30.cash',
         'candle_table': 'candles_mt5_us30_cash_1m',
         'tick_table': 'market_ticks_us30',
         'tick_size': 0.01,
         'va_percent': 0.70,
+        'sl_offset': 0.1,
         'allow_long': True,
         'allow_short': False,
-        'sessions': {'TOKYO': True, 'LONDON': True, 'NY': False},
+        'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
     },
     {
-        'enabled': True,
+        'enabled': False,
         'symbol': 'XAUAUD',
         'candle_table': 'candles_mt5_xauaud_1m',
         'tick_table': 'market_ticks_xauaud',
         'tick_size': 0.01,
         'va_percent': 0.70,
+        'sl_offset': 0.10,
         'allow_long': False,
         'allow_short': True,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
@@ -126,6 +137,7 @@ ASSETS = [
         'tick_table': 'market_ticks_xpdusd',
         'tick_size': 0.01,
         'va_percent': 0.70,
+        'sl_offset': 0.10,
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
@@ -137,6 +149,7 @@ ASSETS = [
         'tick_table': 'market_ticks_xptusd',
         'tick_size': 0.01,
         'va_percent': 0.70,
+        'sl_offset': 0.10,
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': False, 'NY': True},
@@ -289,8 +302,41 @@ def is_session_start(dt):
     return None
 
 
+def get_exit_scenario(trade):
+    """
+    Détermine le scénario de sortie du trade de manière claire
+    Returns: (scenario_code, scenario_label, emoji)
+    """
+    result = trade['result']
+    tp1_hit = pd.notna(trade.get('tp1_time'))
+    tp2_hit = pd.notna(trade.get('tp2_time'))
+    
+    if result == "WIN":
+        if tp1_hit and tp2_hit:
+            return ("TP1_TP2", "TP1 ✓ → TP2 ✓ (Full Win)", "✅✅")
+        elif tp2_hit:
+            return ("TP2_DIRECT", "TP2 direct (rare)", "✅")
+        else:
+            return ("WIN_OTHER", "Win (autre)", "✅")
+    
+    elif result == "BE":
+        if tp1_hit:
+            return ("TP1_BE", "TP1 ✓ → BE (SL@Entry)", "🟡")
+        else:
+            return ("BE_OTHER", "BE (autre)", "🟡")
+    
+    elif result == "LOSS":
+        if tp1_hit:
+            # TP1 hit mais ensuite SL? Ne devrait pas arriver avec trailing
+            return ("TP1_SL", "TP1 ✓ → SL (anormal)", "⚠️")
+        else:
+            return ("SL_DIRECT", "SL direct (Full Loss)", "❌")
+    
+    return ("UNKNOWN", "Unknown", "❓")
+
+
 def display_last_trades(df_trades, count):
-    """Affiche les X derniers trades en détail"""
+    """Affiche les X derniers trades en détail avec scénario de sortie clair"""
     if df_trades.empty:
         return
     
@@ -301,41 +347,179 @@ def display_last_trades(df_trades, count):
     print(f"{'=' * 120}")
     
     for idx, trade in last_trades.iterrows():
-        result_emoji = "✅" if trade['result'] == "WIN" else ("🟡" if trade['result'] == "BE" else "❌")
+        scenario_code, scenario_label, emoji = get_exit_scenario(trade)
         
         print(f"\n{'─' * 100}")
-        print(f"TRADE #{idx + 1} | {trade['symbol']} | {trade['type']} | {result_emoji} {trade['result']} | {trade['pnl_r']:+.2f}R")
+        print(f"TRADE #{idx + 1} | {trade['symbol']} | {trade['type']} | {emoji} {trade['result']} | {trade['pnl_r']:+.2f}R")
         print(f"{'─' * 100}")
         
         # Timing
         entry_time = trade['entry_time'].strftime('%Y-%m-%d %H:%M') if pd.notna(trade['entry_time']) else "N/A"
-        exit_time = trade['exit_time'].strftime('%Y-%m-%d %H:%M') if pd.notna(trade['exit_time']) else "N/A"
+        exit_time = trade['exit_time'].strftime('%H:%M') if pd.notna(trade['exit_time']) else "N/A"
         breakout_time = trade['breakout_time'].strftime('%H:%M') if pd.notna(trade['breakout_time']) else "N/A"
-        tp1_time = trade['tp1_time'].strftime('%H:%M') if pd.notna(trade.get('tp1_time')) else "-"
         
         print(f"  Session: {trade['session']} | Breakout: {breakout_time} | Entry: {entry_time} | Exit: {exit_time}")
-        print(f"  Breakout Duration: {trade['breakout_duration_min']:.1f} min | TP1 Hit: {tp1_time}")
+        print(f"  Breakout Duration: {trade['breakout_duration_min']:.1f} min")
         
-        # Prix
+        # Scénario de sortie - NOUVEAU FORMAT CLAIR
+        print(f"\n  📊 SCÉNARIO DE SORTIE: {scenario_label}")
+        
+        tp1_time = trade['tp1_time'].strftime('%H:%M') if pd.notna(trade.get('tp1_time')) else None
+        tp2_time = trade['tp2_time'].strftime('%H:%M') if pd.notna(trade.get('tp2_time')) else None
+        
+        # Timeline visuelle
+        timeline = f"     Entry ({entry_time[-5:]}) "
+        
+        if scenario_code == "TP1_TP2":
+            timeline += f"→ TP1 ✓ ({tp1_time}) → TP2 ✓ ({tp2_time})"
+        elif scenario_code == "TP1_BE":
+            timeline += f"→ TP1 ✓ ({tp1_time}) → BE ({exit_time})"
+        elif scenario_code == "SL_DIRECT":
+            timeline += f"→ SL ✗ ({exit_time})"
+        elif scenario_code == "TP2_DIRECT":
+            timeline += f"→ TP2 ✓ ({tp2_time})"
+        else:
+            timeline += f"→ Exit ({exit_time})"
+        
+        print(timeline)
+        
+        # Prix avec indication de ce qui a été touché
         print(f"\n  PRIX:")
+        
+        # Entry
         print(f"    Entry:  {trade['entry']:.2f}")
-        print(f"    SL:     {trade['sl']:.2f}")
-        print(f"    TP1:    {trade['tp1']:.2f}" if pd.notna(trade.get('tp1')) else "    TP1:    -")
-        print(f"    TP2:    {trade['tp']:.2f} (POC)")
-        print(f"    Exit:   {trade['exit_price']:.2f}")
+        
+        # SL avec statut
+        sl_status = "← HIT" if scenario_code == "SL_DIRECT" else ("← moved to BE" if scenario_code == "TP1_BE" else "")
+        print(f"    SL:     {trade['sl']:.2f} {sl_status}")
+        
+        # TP1 avec statut
+        if pd.notna(trade.get('tp1')):
+            tp1_status = "✓ HIT" if pd.notna(trade.get('tp1_time')) else "✗ not hit"
+            print(f"    TP1:    {trade['tp1']:.2f} ({TP1_RR}R) {tp1_status}")
+        
+        # TP2/POC avec statut
+        tp2_status = "✓ HIT" if pd.notna(trade.get('tp2_time')) else "✗ not hit"
+        print(f"    TP2:    {trade['tp']:.2f} (POC) {tp2_status}")
+        
+        # Exit price
+        exit_label = ""
+        if trade['exit_price'] == trade['sl']:
+            exit_label = "(= SL)"
+        elif trade['exit_price'] == trade['entry']:
+            exit_label = "(= Entry/BE)"
+        elif trade['exit_price'] == trade['tp']:
+            exit_label = "(= TP2)"
+        print(f"    Exit:   {trade['exit_price']:.2f} {exit_label}")
         
         # Volume Profile
         print(f"\n  VOLUME PROFILE:")
         print(f"    VAH: {trade['vah_at_entry']:.2f} | POC: {trade['poc_at_entry']:.2f} | VAL: {trade['val_at_entry']:.2f}")
         print(f"    POC Strength: {trade['poc_strength']:.2f}x | Shape: {trade['vp_shape']}")
         
-        # Résultat
+        # Résultat avec décomposition
         risk_pts = abs(trade['entry'] - trade['sl'])
         print(f"\n  RÉSULTAT:")
         print(f"    R:R Potentiel: {trade['rr']:.2f}")
         print(f"    Risk (pts): {risk_pts:.2f}")
-        print(f"    PnL: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
+        
+        # Décomposition du PnL pour les trades avec trailing
+        if scenario_code == "TP1_TP2":
+            pnl_tp1 = TP1_RR * 0.5
+            pnl_tp2 = trade['rr'] * 0.5
+            print(f"    PnL TP1 (50%): +{pnl_tp1:.2f}R")
+            print(f"    PnL TP2 (50%): +{pnl_tp2:.2f}R")
+            print(f"    PnL Total: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
+        elif scenario_code == "TP1_BE":
+            pnl_tp1 = TP1_RR * 0.5
+            print(f"    PnL TP1 (50%): +{pnl_tp1:.2f}R")
+            print(f"    PnL TP2 (50%): 0.00R (BE)")
+            print(f"    PnL Total: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
+        elif scenario_code == "SL_DIRECT":
+            print(f"    PnL TP1 (50%): -0.50R")
+            print(f"    PnL TP2 (50%): -0.50R")
+            print(f"    PnL Total: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
+        else:
+            print(f"    PnL: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
+        
         print(f"    Capital après: ${trade['capital_after']:,.2f}")
+
+
+def display_open_trades(assets_data, current_capital):
+    """Affiche les trades actuellement ouverts (non clôturés)"""
+    open_trades = []
+    
+    for symbol, data in assets_data.items():
+        if data['active_trade'] is not None:
+            trade = data['active_trade'].copy()
+            trade['symbol'] = symbol
+            open_trades.append(trade)
+    
+    if not open_trades:
+        print(f"\n{'=' * 80}")
+        print("TRADES EN COURS: Aucun")
+        print(f"{'=' * 80}")
+        return
+    
+    print(f"\n{'=' * 120}")
+    print(f"TRADES EN COURS ({len(open_trades)} positions ouvertes)")
+    print(f"{'=' * 120}")
+    
+    for trade in open_trades:
+        symbol = trade['symbol']
+        trade_type = trade['type']
+        entry = trade['entry']
+        sl = trade['sl']
+        original_sl = trade.get('original_sl', sl)
+        tp1 = trade.get('tp1')
+        tp2 = trade['tp']
+        rr = trade['rr']
+        partial_closed = trade.get('partial_closed', False)
+        
+        entry_time = trade['entry_time'].strftime('%Y-%m-%d %H:%M') if trade.get('entry_time') else "N/A"
+        breakout_time = trade['breakout_time'].strftime('%H:%M') if trade.get('breakout_time') else "N/A"
+        
+        # Statut du trade
+        if partial_closed:
+            status = "🟡 TP1 HIT - SL @ BE"
+            sl_display = f"{sl:.2f} (moved to BE)"
+        else:
+            status = "🔵 En attente TP1"
+            sl_display = f"{sl:.2f}"
+        
+        print(f"\n{'─' * 100}")
+        print(f"OPEN | {symbol} | {trade_type} | {status}")
+        print(f"{'─' * 100}")
+        
+        print(f"  Session: {trade.get('session_at_open', 'N/A')} | Breakout: {breakout_time} | Entry: {entry_time}")
+        
+        print(f"\n  PRIX:")
+        print(f"    Entry:      {entry:.2f}")
+        print(f"    SL:         {sl_display}")
+        if tp1:
+            tp1_status = "✓ HIT" if partial_closed else "⏳ pending"
+            print(f"    TP1:        {tp1:.2f} ({TP1_RR}R) {tp1_status}")
+        print(f"    TP2 (POC):  {tp2:.2f} ⏳ pending")
+        
+        print(f"\n  VOLUME PROFILE:")
+        print(f"    VAH: {trade.get('vah_at_entry', 0):.2f} | POC: {trade.get('poc_at_entry', 0):.2f} | VAL: {trade.get('val_at_entry', 0):.2f}")
+        print(f"    POC Strength: {trade.get('poc_strength', 0):.2f}x | Shape: {trade.get('vp_shape', 'N/A')}")
+        
+        print(f"\n  POTENTIEL:")
+        print(f"    R:R Potentiel: {rr:.2f}")
+        risk_amount = current_capital * RISK_PERCENT
+        
+        if partial_closed:
+            # Déjà TP1, reste 50% en jeu
+            locked_pnl = TP1_RR * 0.5
+            remaining_potential = rr * 0.5
+            print(f"    PnL verrouillé (TP1): +{locked_pnl:.2f}R")
+            print(f"    Potentiel restant (TP2): +{remaining_potential:.2f}R")
+            print(f"    Risque restant: 0R (SL @ BE)")
+        else:
+            print(f"    Si TP1+TP2: +{(TP1_RR * 0.5 + rr * 0.5):.2f}R (${risk_amount * (TP1_RR * 0.5 + rr * 0.5):+.2f})")
+            print(f"    Si TP1+BE:  +{TP1_RR * 0.5:.2f}R (${risk_amount * TP1_RR * 0.5:+.2f})")
+            print(f"    Si SL:      -1.00R (${-risk_amount:.2f})")
 
 
 def run_backtest():
@@ -681,7 +865,8 @@ def run_backtest():
                         vp_shape_ok = False
                         filtered_by_vp_shape += 1
                 if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_short']:
-                    sl = asset_data['swing_extreme'] + 0.10
+                    sl_offset = config.get('sl_offset', 0.10)
+                    sl = asset_data['swing_extreme'] + sl_offset
                     risk = sl - close
                     if TP_MODE == "POC":
                         tp = poc
@@ -727,7 +912,8 @@ def run_backtest():
                         vp_shape_ok = False
                         filtered_by_vp_shape += 1
                 if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_long']:
-                    sl = asset_data['swing_extreme'] - 0.10
+                    sl_offset = config.get('sl_offset', 0.10)
+                    sl = asset_data['swing_extreme'] - sl_offset
                     risk = close - sl
                     if TP_MODE == "POC":
                         tp = poc
@@ -968,6 +1154,10 @@ def run_backtest():
         t_pf = t_gross_profit / t_gross_loss if t_gross_loss > 0 else float('inf')
         pf_str = f"{t_pf:.2f}" if t_pf != float('inf') else "inf"
         print(f"  {trade_type:<8} | {t_total:>7} trades | {t_wins:>5} W | {t_losses:>5} L | {t_wr:>5.1f}% | {t_pnl_r:>+8.1f}R | PF {pf_str}")
+    
+    # Affichage des trades en cours si activé
+    if SHOW_OPEN_TRADES:
+        display_open_trades(assets_data, current_capital)
     
     # Affichage des derniers trades si activé
     if SHOW_LAST_TRADES:
