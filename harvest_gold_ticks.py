@@ -11,18 +11,8 @@ load_dotenv()
 
 # Symboles à surveiller : {symbole_mt5: nom_table_postgres}
 SYMBOLS = {
-    "JP225.cash": "market_ticks_jp225",
-    "XAUEUR": "market_ticks_xaueur",
     "XAUUSD": "market_ticks_xauusd",
-    "XAUAUD": "market_ticks_xauaud",
-    "XAGUSD": "market_ticks_xagusd",
-    "XPDUSD": "market_ticks_xpdusd",
-    "XPTUSD": "market_ticks_xptusd",
-    "GER40.cash": "market_ticks_ger40",
-    "UK100.cash": "market_ticks_uk100",
-    "US30.cash": "market_ticks_us30",
-    "HK50.cash": "market_ticks_hk50",
-    "EU50.cash": "market_ticks_eu50",
+    "BTCUSD": "market_ticks_btcusd",
 }
 
 DEFAULT_DAYS_BACK = 365  # Nombre de jours à récupérer si DB vide

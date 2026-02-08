@@ -16,9 +16,9 @@ load_dotenv()
 # CONFIGURATION MULTI-ASSETS
 # =============================================================================
 
-START_DATE_STR = "2025-05-01 00:00:00"
+START_DATE_STR = "2025-01-01 00:00:00"
 INITIAL_CAPITAL = 50000.0
-RISK_PERCENT = 0.005
+RISK_PERCENT = 0.006
 
 TP_MODE = "POC"
 TARGET_RR = 3.0
@@ -29,9 +29,9 @@ TP1_RR = 1.3
 
 FILTER_ENTRY_VS_POC = True
 USE_BREAKOUT_DURATION_FILTER = True
-MAX_BREAKOUT_DURATION_MINUTES = 3
+MAX_BREAKOUT_DURATION_MINUTES = 4
 USE_VP_STRUCTURE_FILTER = True
-MIN_POC_STRENGTH = 3.0
+MIN_POC_STRENGTH = 2.5
 USE_VP_SHAPE_FILTER = True
 #EXCLUDED_VP_SHAPES = ["P-SHAPE"]
 EXCLUDED_VP_SHAPES = [""]
@@ -75,27 +75,27 @@ ASSETS = [
     },
     {
         'enabled': False,
-        'symbol': 'US100.cash',
-        'candle_table': 'candles_mt5_us100_cash_1m',
-        'tick_table': 'market_ticks_us100',
-        'tick_size': 1.0,
+        'symbol': 'BTCUSD',
+        'candle_table': 'candles_mt5_btcusd_1m',
+        'tick_table': 'market_ticks_btcusd',
+        'tick_size': 0.01,
         'va_percent': 0.70,
-        'sl_offset': 1.0,
+        'sl_offset': 1.00,  # Offset SL au-delà du swing extreme
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
     },
     {
         'enabled': False,
-        'symbol': 'GER40.cash',
-        'candle_table': 'candles_mt5_ger40_cash_1m',
-        'tick_table': 'market_ticks_ger40',
-        'tick_size': 0.01,
+        'symbol': 'US100.cash',
+        'candle_table': 'candles_mt5_us100_cash_1m',
+        'tick_table': 'market_ticks_us100',
+        'tick_size': 1.0,
         'va_percent': 0.70,
-        'sl_offset': 1.0,
+        'sl_offset': 2.0,
         'allow_long': True,
-        'allow_short': False,
-        'sessions': {'TOKYO': True, 'LONDON': True, 'NY': False},
+        'allow_short': True,
+        'sessions': {'TOKYO': False, 'LONDON': False, 'NY': True},
     },
     {
         'enabled': False,
@@ -107,7 +107,19 @@ ASSETS = [
         'sl_offset': 0.50,
         'allow_long': True,
         'allow_short': True,
-        'sessions': {'TOKYO': False, 'LONDON': True, 'NY': True},
+        'sessions': {'TOKYO': False, 'LONDON': False, 'NY': True},
+    },
+    {
+        'enabled': False,
+        'symbol': 'XAGUSD',
+        'candle_table': 'candles_mt5_xauaud_1m',
+        'tick_table': 'market_ticks_xauaud',
+        'tick_size': 0.01,
+        'va_percent': 0.70,
+        'sl_offset': 0.50,
+        'allow_long': True,
+        'allow_short': True,
+        'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
     },
 ]
 
@@ -587,6 +599,7 @@ def run_backtest():
     day_trades = 0
     day_wins = 0
     day_pnl_r = 0.0
+    day_pnl_pct = 0.0  # AJOUT
     day_high_water = INITIAL_CAPITAL
     day_max_dd = 0.0
     
@@ -596,6 +609,7 @@ def run_backtest():
     week_trades = 0
     week_wins = 0
     week_pnl_r = 0.0
+    week_pnl_pct = 0.0  # AJOUT
     week_high_water = INITIAL_CAPITAL
     week_max_dd = 0.0
     
@@ -605,6 +619,7 @@ def run_backtest():
     month_trades = 0
     month_wins = 0
     month_pnl_r = 0.0
+    month_pnl_pct = 0.0  # AJOUT
     month_high_water = INITIAL_CAPITAL
     month_max_dd = 0.0
     
@@ -641,14 +656,14 @@ def run_backtest():
     print(f"[RESET]   VP Reset: {vp_reset_status}")
     
     if DISPLAY_MODE != "NONE":
-        print("=" * 120)
+        print("=" * 140)
         if DISPLAY_MODE == "DAILY":
-            print(f"{'DATE':<12} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'CAPITAL':>14} | {'DAY DD%':>8} | {'MAX DD%':>8}")
+            print(f"{'DATE':<12} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'PnL %':>8} | {'CAPITAL':>14} | {'DAY DD%':>8} | {'MAX DD%':>8}")
         elif DISPLAY_MODE == "WEEKLY":
-            print(f"{'SEMAINE':<12} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'CAPITAL':>14} | {'WK DD%':>8} | {'MAX DD%':>8}")
+            print(f"{'SEMAINE':<12} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'PnL %':>8} | {'CAPITAL':>14} | {'WK DD%':>8} | {'MAX DD%':>8}")
         elif DISPLAY_MODE == "MONTHLY":
-            print(f"{'MOIS':<10} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'CAPITAL':>14} | {'MTH DD%':>8} | {'MAX DD%':>8}")
-        print("-" * 120)
+            print(f"{'MOIS':<10} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'PnL %':>8} | {'CAPITAL':>14} | {'MTH DD%':>8} | {'MAX DD%':>8}")
+        print("-" * 140)
     
     t_start = time.time()
     
@@ -667,11 +682,14 @@ def run_backtest():
             if DISPLAY_MODE == "DAILY" and day_trades > 0:
                 day_wr = (day_wins / day_trades * 100) if day_trades > 0 else 0
                 day_max_dd_pct = (day_max_dd / day_high_water * 100) if day_high_water > 0 else 0
-                print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+                # Calcul du PnL en %
+                day_pnl_pct = ((current_capital - day_start_capital) / day_start_capital * 100) if day_start_capital > 0 else 0
+                print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | {day_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             day_start_capital = current_capital
             day_trades = 0
             day_wins = 0
             day_pnl_r = 0.0
+            day_pnl_pct = 0.0
             day_high_water = current_capital
             day_max_dd = 0.0
         
@@ -680,11 +698,14 @@ def run_backtest():
             if DISPLAY_MODE == "WEEKLY" and week_trades > 0:
                 week_wr = (week_wins / week_trades * 100) if week_trades > 0 else 0
                 week_max_dd_pct = (week_max_dd / week_high_water * 100) if week_high_water > 0 else 0
-                print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+                # Calcul du PnL en %
+                week_pnl_pct = ((current_capital - week_start_capital) / week_start_capital * 100) if week_start_capital > 0 else 0
+                print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | {week_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             week_start_capital = current_capital
             week_trades = 0
             week_wins = 0
             week_pnl_r = 0.0
+            week_pnl_pct = 0.0
             week_high_water = current_capital
             week_max_dd = 0.0
         
@@ -693,11 +714,14 @@ def run_backtest():
             if DISPLAY_MODE == "MONTHLY" and month_trades > 0:
                 month_wr = (month_wins / month_trades * 100) if month_trades > 0 else 0
                 month_max_dd_pct = (month_max_dd / month_high_water * 100) if month_high_water > 0 else 0
-                print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+                # Calcul du PnL en %
+                month_pnl_pct = ((current_capital - month_start_capital) / month_start_capital * 100) if month_start_capital > 0 else 0
+                print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | {month_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             month_start_capital = current_capital
             month_trades = 0
             month_wins = 0
             month_pnl_r = 0.0
+            month_pnl_pct = 0.0
             month_high_water = current_capital
             month_max_dd = 0.0
         
@@ -705,7 +729,44 @@ def run_backtest():
         current_week = row_week
         current_month = row_month
         
-        # Gestion des trades actifs
+        # =================================================================
+        # ÉTAPE 1: SESSION DETECTION & VP UPDATE
+        # TOUJOURS exécuté, même avec un trade actif
+        # (aligné sur le live qui reconstruit le VP à chaque bougie)
+        # =================================================================
+        curr_sess = get_session(row.dt)
+        asset_sessions = config.get('sessions', {})
+        
+        if RESET_VP_PER_SESSION:
+            session_start = is_session_start(row.dt)
+            if session_start and asset_sessions.get(session_start, False):
+                asset_data['vp'].reset()
+                asset_data['state'] = "INSIDE"
+                asset_data['swing_extreme'] = 0.0
+                asset_data['current_session'] = session_start
+                asset_data['session_start_dt'] = get_session_start_time(session_start, row.dt)
+        else:
+            if row.dt.hour in [23, 0]:
+                asset_data['vp'].reset()
+                asset_data['state'] = "INSIDE"
+                asset_data['swing_extreme'] = 0.0
+        
+        # Ajouter les ticks au VP (TOUJOURS, même pendant un trade actif)
+        if asset_sessions.get(curr_sess, False):
+            if current_minute in asset_data['ticks_by_minute']:
+                prices, volumes, timestamps = asset_data['ticks_by_minute'][current_minute]
+                session_start_dt = asset_data.get('session_start_dt')
+                if session_start_dt is not None:
+                    session_start_np = np.datetime64(session_start_dt)
+                    mask = timestamps >= session_start_np
+                    if mask.any():
+                        asset_data['vp'].add_ticks(prices[mask], volumes[mask])
+                else:
+                    asset_data['vp'].add_ticks(prices, volumes)
+        
+        # =================================================================
+        # ÉTAPE 2: GESTION DES TRADES ACTIFS
+        # =================================================================
         active_trade = asset_data['active_trade']
         if active_trade:
             res = None
@@ -831,49 +892,12 @@ def run_backtest():
             else:
                 continue
         
-        curr_sess = get_session(row.dt)
-        asset_sessions = config.get('sessions', {})
-        
-        # =====================================================================
-        # RESET VP PAR SESSION - CORRECTION ALIGNÉE SUR LE LIVE
-        # =====================================================================
-        if RESET_VP_PER_SESSION:
-            session_start = is_session_start(row.dt)
-            if session_start and asset_sessions.get(session_start, False):
-                asset_data['vp'].reset()
-                asset_data['state'] = "INSIDE"
-                asset_data['swing_extreme'] = 0.0
-                asset_data['current_session'] = session_start
-                # Calculer le début exact de cette session (avec les minutes)
-                asset_data['session_start_dt'] = get_session_start_time(session_start, row.dt)
-        else:
-            if row.dt.hour in [23, 0]:
-                asset_data['vp'].reset()
-                asset_data['state'] = "INSIDE"
-                asset_data['swing_extreme'] = 0.0
-                continue
-        
+        # =================================================================
+        # ÉTAPE 3: STATE MACHINE (seulement si pas de trade actif)
+        # =================================================================
         if not asset_sessions.get(curr_sess, False):
             asset_data['state'] = "INSIDE"
             continue
-        
-        # =====================================================================
-        # AJOUT DES TICKS AU VP - OPTIMISÉ: Filtrer par timestamp sans accès DataFrame
-        # =====================================================================
-        if current_minute in asset_data['ticks_by_minute']:
-            prices, volumes, timestamps = asset_data['ticks_by_minute'][current_minute]
-            
-            # Si on a un session_start_dt défini, filtrer les ticks
-            session_start_dt = asset_data.get('session_start_dt')
-            if session_start_dt is not None:
-                # Convertir session_start_dt en numpy datetime64 pour comparaison rapide
-                session_start_np = np.datetime64(session_start_dt)
-                mask = timestamps >= session_start_np
-                if mask.any():
-                    asset_data['vp'].add_ticks(prices[mask], volumes[mask])
-            else:
-                # Pas de session_start_dt, ajouter tous les ticks
-                asset_data['vp'].add_ticks(prices, volumes)
         
         poc, vah, val = asset_data['vp'].get_levels()
         if poc is None:
@@ -997,17 +1021,20 @@ def run_backtest():
     if DISPLAY_MODE == "DAILY" and day_trades > 0:
         day_wr = (day_wins / day_trades * 100) if day_trades > 0 else 0
         day_max_dd_pct = (day_max_dd / day_high_water * 100) if day_high_water > 0 else 0
-        print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+        day_pnl_pct = ((current_capital - day_start_capital) / day_start_capital * 100) if day_start_capital > 0 else 0
+        print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | {day_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
     
     if DISPLAY_MODE == "WEEKLY" and week_trades > 0:
         week_wr = (week_wins / week_trades * 100) if week_trades > 0 else 0
         week_max_dd_pct = (week_max_dd / week_high_water * 100) if week_high_water > 0 else 0
-        print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+        week_pnl_pct = ((current_capital - week_start_capital) / week_start_capital * 100) if week_start_capital > 0 else 0
+        print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | {week_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
     
     if DISPLAY_MODE == "MONTHLY" and month_trades > 0:
         month_wr = (month_wins / month_trades * 100) if month_trades > 0 else 0
         month_max_dd_pct = (month_max_dd / month_high_water * 100) if month_high_water > 0 else 0
-        print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+        month_pnl_pct = ((current_capital - month_start_capital) / month_start_capital * 100) if month_start_capital > 0 else 0
+        print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | {month_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
     
     elapsed = time.time() - t_start
     

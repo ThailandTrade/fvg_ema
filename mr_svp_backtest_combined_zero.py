@@ -17,8 +17,8 @@ load_dotenv()
 # =============================================================================
 
 START_DATE_STR = "2025-05-01 00:00:00"
-INITIAL_CAPITAL = 50000.0
-RISK_PERCENT = 0.005
+INITIAL_CAPITAL = 100000.0
+RISK_PERCENT = 0.008
 
 TP_MODE = "POC"
 TARGET_RR = 3.0
@@ -33,32 +33,48 @@ MAX_BREAKOUT_DURATION_MINUTES = 3
 USE_VP_STRUCTURE_FILTER = True
 MIN_POC_STRENGTH = 3.0
 USE_VP_SHAPE_FILTER = True
-#EXCLUDED_VP_SHAPES = ["P-SHAPE"]
 EXCLUDED_VP_SHAPES = [""]
-DISPLAY_MODE = "WEEKLY"  # Options: "NONE", "DAILY", "WEEKLY", "MONTHLY"
+DISPLAY_MODE = "WEEKLY"
 RESET_VP_PER_SESSION = True
+
+# =============================================================================
+# RÈGLES PROP FIRM
+# =============================================================================
+PROP_FIRM_RULES = {
+    'max_daily_dd_percent': 3.0,      # Max Daily DD < 3%
+    'max_total_dd_percent': 5.0,      # Max DD < 5%
+    'max_day_profit_percent': 15.0,   # Un jour ne peut pas dépasser 15% du profit total
+    'min_positive_days': 7,           # Au moins 7 jours avec gain >= min_daily_gain_percent
+    'min_daily_gain_percent': 0.25,   # Gain minimum par jour pour compter comme "jour qualifiant"
+    'rolling_window_days': 30,        # Sur une période de 30 jours
+    'min_trade_duration_above_1min_percent': 50.0,  # 50% des trades doivent durer > 1 minute
+}
 
 # =============================================================================
 # AFFICHAGE DES DERNIERS TRADES
 # =============================================================================
-SHOW_LAST_TRADES = False      # Activer/désactiver l'affichage détaillé
-LAST_TRADES_COUNT = 10       # Nombre de trades à afficher
+SHOW_LAST_TRADES = False
+LAST_TRADES_COUNT = 10
 
 # =============================================================================
 # AFFICHAGE DES TRADES EN COURS (NON CLOS)
 # =============================================================================
-SHOW_OPEN_TRADES = True      # Activer/désactiver l'affichage des trades ouverts
+SHOW_OPEN_TRADES = False
 
 # =============================================================================
 # CONFIGURATION DES HEURES DE SESSION (UTC)
-# vp_start/vp_end : heures pour collecter les ticks et construire le VP
-# trade_start/trade_end : heures où les entrées en position sont autorisées
 # =============================================================================
 SESSIONS_CONFIG = {
     'TOKYO':  {'vp_start': 0,    'vp_end': 4,    'trade_start': 0,    'trade_end': 4},
     'LONDON': {'vp_start': 8,    'vp_end': 13,   'trade_start': 9,    'trade_end': 13},   # VP dès 8h, trades dès 9h
     'NY':     {'vp_start': 14.5, 'vp_end': 21,   'trade_start': 14.5, 'trade_end': 21},
 }
+
+# SESSIONS_CONFIG = {
+    # 'TOKYO':  {'vp_start': 0,    'vp_end': 4,    'trade_start': 0,    'trade_end': 4},
+    # 'LONDON': {'vp_start': 8,    'vp_end': 13,   'trade_start': 9,    'trade_end': 13},
+    # 'NY':     {'vp_start': 14.5, 'vp_end': 21,   'trade_start': 14.5, 'trade_end': 21},
+# }
 
 ASSETS = [
     {
@@ -68,7 +84,7 @@ ASSETS = [
         'tick_table': 'market_ticks_xauusd',
         'tick_size': 0.01,
         'va_percent': 0.70,
-        'sl_offset': 0.50,  # Offset SL au-delà du swing extreme
+        'sl_offset': 0.50,
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
@@ -210,25 +226,16 @@ class IncrementalVolumeProfile:
 
 
 def get_session_start_time(session_name: str, reference_dt: datetime) -> datetime:
-    """
-    Retourne le datetime exact du début de la session VP pour un jour donné.
-    Utilise vp_start (pas trade_start) car c'est pour le chargement des ticks.
-    """
     if session_name not in SESSIONS_CONFIG:
         return None
-    
     cfg = SESSIONS_CONFIG[session_name]
     start_hour = cfg['vp_start']
-    
-    # Extraire heures et minutes
     hour = int(start_hour)
     minute = int((start_hour % 1) * 60)
-    
     return reference_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
 def is_in_session_vp(dt: datetime, session_name: str) -> bool:
-    """Vérifie si un datetime est dans la plage horaire VP d'une session."""
     if session_name not in SESSIONS_CONFIG:
         return False
     cfg = SESSIONS_CONFIG[session_name]
@@ -237,7 +244,6 @@ def is_in_session_vp(dt: datetime, session_name: str) -> bool:
 
 
 def is_in_session_trade(dt: datetime, session_name: str) -> bool:
-    """Vérifie si un datetime est dans la plage horaire TRADE d'une session."""
     if session_name not in SESSIONS_CONFIG:
         return False
     cfg = SESSIONS_CONFIG[session_name]
@@ -246,18 +252,12 @@ def is_in_session_trade(dt: datetime, session_name: str) -> bool:
 
 
 def load_all_data(conn, asset):
-    """
-    Charge les candles et les ticks.
-    Les candles sont filtrées par les heures VP (vp_start à vp_end).
-    Les ticks sont chargés sans filtrage - le filtrage se fera à la volée.
-    """
     requested_start = datetime.strptime(START_DATE_STR, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     data_start = requested_start - timedelta(hours=2)
     ts_start = int(data_start.timestamp() * 1000)
     
     sessions = asset.get('sessions', {'TOKYO': True, 'LONDON': True, 'NY': True})
     
-    # Charger les candles
     query_candles = f"SELECT ts, open, high, low, close FROM {asset['candle_table']} WHERE ts >= {ts_start} ORDER BY ts ASC"
     df_candles = pd.read_sql(query_candles, conn)
     df_candles['dt'] = pd.to_datetime(df_candles['ts'], unit='ms', utc=True)
@@ -265,7 +265,6 @@ def load_all_data(conn, asset):
     if df_candles.empty:
         return df_candles, pd.DataFrame()
     
-    # Filtrer les candles par sessions actives (heures VP: vp_start à vp_end)
     def is_candle_in_active_session(dt):
         current_time = dt.hour + dt.minute / 60.0
         for sess_name, is_active in sessions.items():
@@ -280,7 +279,6 @@ def load_all_data(conn, asset):
     if df_candles.empty:
         return df_candles, pd.DataFrame()
     
-    # Charger TOUS les ticks (sans filtrage par heure)
     t_start = data_start.strftime("%Y-%m-%d %H:%M:%S")
     t_end = df_candles['dt'].max().strftime("%Y-%m-%d %H:%M:%S")
     
@@ -295,7 +293,6 @@ def load_all_data(conn, asset):
 
 
 def get_session(dt):
-    """Retourne le nom de la session VP active pour un datetime donné."""
     h = dt.hour + dt.minute / 60.0
     for sess_name, cfg in SESSIONS_CONFIG.items():
         if cfg['vp_start'] <= h < cfg['vp_end']:
@@ -304,7 +301,6 @@ def get_session(dt):
 
 
 def is_session_start(dt):
-    """Vérifie si le datetime correspond au début exact d'une session VP."""
     current_time = dt.hour + dt.minute / 60.0
     for sess_name, cfg in SESSIONS_CONFIG.items():
         if current_time == cfg['vp_start']:
@@ -313,7 +309,6 @@ def is_session_start(dt):
 
 
 def can_trade_now(dt, session_name: str) -> bool:
-    """Vérifie si on peut trader à ce moment (dans les heures trade de la session)."""
     if session_name not in SESSIONS_CONFIG:
         return False
     cfg = SESSIONS_CONFIG[session_name]
@@ -322,39 +317,34 @@ def can_trade_now(dt, session_name: str) -> bool:
 
 
 def get_exit_scenario(trade):
-    """
-    Détermine le scénario de sortie du trade de manière claire
-    Returns: (scenario_code, scenario_label, emoji)
-    """
     result = trade['result']
     tp1_hit = pd.notna(trade.get('tp1_time'))
     tp2_hit = pd.notna(trade.get('tp2_time'))
     
     if result == "WIN":
         if tp1_hit and tp2_hit:
-            return ("TP1_TP2", "TP1 ✓ → TP2 ✓ (Full Win)", "✅✅")
+            return ("TP1_TP2", "TP1 OK -> TP2 OK (Full Win)", "[WIN]")
         elif tp2_hit:
-            return ("TP2_DIRECT", "TP2 direct (rare)", "✅")
+            return ("TP2_DIRECT", "TP2 direct (rare)", "[WIN]")
         else:
-            return ("WIN_OTHER", "Win (autre)", "✅")
+            return ("WIN_OTHER", "Win (autre)", "[WIN]")
     
     elif result == "BE":
         if tp1_hit:
-            return ("TP1_BE", "TP1 ✓ → BE (SL@Entry)", "🟡")
+            return ("TP1_BE", "TP1 OK -> BE (SL@Entry)", "[BE]")
         else:
-            return ("BE_OTHER", "BE (autre)", "🟡")
+            return ("BE_OTHER", "BE (autre)", "[BE]")
     
     elif result == "LOSS":
         if tp1_hit:
-            return ("TP1_SL", "TP1 ✓ → SL (anormal)", "⚠️")
+            return ("TP1_SL", "TP1 OK -> SL (anormal)", "[WARN]")
         else:
-            return ("SL_DIRECT", "SL direct (Full Loss)", "❌")
+            return ("SL_DIRECT", "SL direct (Full Loss)", "[LOSS]")
     
-    return ("UNKNOWN", "Unknown", "❓")
+    return ("UNKNOWN", "Unknown", "[?]")
 
 
 def display_last_trades(df_trades, count):
-    """Affiche les X derniers trades en détail avec scénario de sortie clair"""
     if df_trades.empty:
         return
     
@@ -368,40 +358,36 @@ def display_last_trades(df_trades, count):
         scenario_code, scenario_label, emoji = get_exit_scenario(trade)
         
         print(f"\n{'─' * 100}")
-        print(f"TRADE #{idx + 1} | {trade['symbol']} | {trade['type']} | {emoji} {trade['result']} | {trade['pnl_r']:+.2f}R")
+        print(f"TRADE #{idx + 1} | {trade['symbol']} | {trade['type']} | {emoji} {trade['result']} | {trade['pnl_r']:+.2f}R | Duration: {trade['trade_duration_min']:.1f}min")
         print(f"{'─' * 100}")
         
-        # Timing
         entry_time = trade['entry_time'].strftime('%Y-%m-%d %H:%M') if pd.notna(trade['entry_time']) else "N/A"
         exit_time = trade['exit_time'].strftime('%H:%M') if pd.notna(trade['exit_time']) else "N/A"
         breakout_time = trade['breakout_time'].strftime('%H:%M') if pd.notna(trade['breakout_time']) else "N/A"
         
         print(f"  Session: {trade['session']} | Breakout: {breakout_time} | Entry: {entry_time} | Exit: {exit_time}")
-        print(f"  Breakout Duration: {trade['breakout_duration_min']:.1f} min")
+        print(f"  Breakout Duration: {trade['breakout_duration_min']:.1f} min | Trade Duration: {trade['trade_duration_min']:.1f} min")
         
-        # Scénario de sortie
-        print(f"\n  📊 SCÉNARIO DE SORTIE: {scenario_label}")
+        print(f"\n  SCÉNARIO DE SORTIE: {scenario_label}")
         
         tp1_time = trade['tp1_time'].strftime('%H:%M') if pd.notna(trade.get('tp1_time')) else None
         tp2_time = trade['tp2_time'].strftime('%H:%M') if pd.notna(trade.get('tp2_time')) else None
         
-        # Timeline visuelle
         timeline = f"     Entry ({entry_time[-5:]}) "
         
         if scenario_code == "TP1_TP2":
-            timeline += f"→ TP1 ✓ ({tp1_time}) → TP2 ✓ ({tp2_time})"
+            timeline += f"→ TP1 ({tp1_time}) → TP2 ({tp2_time})"
         elif scenario_code == "TP1_BE":
-            timeline += f"→ TP1 ✓ ({tp1_time}) → BE ({exit_time})"
+            timeline += f"→ TP1 ({tp1_time}) → BE ({exit_time})"
         elif scenario_code == "SL_DIRECT":
-            timeline += f"→ SL ✗ ({exit_time})"
+            timeline += f"→ SL ({exit_time})"
         elif scenario_code == "TP2_DIRECT":
-            timeline += f"→ TP2 ✓ ({tp2_time})"
+            timeline += f"→ TP2 ({tp2_time})"
         else:
             timeline += f"→ Exit ({exit_time})"
         
         print(timeline)
         
-        # Prix avec indication de ce qui a été touché
         print(f"\n  PRIX:")
         print(f"    Entry:  {trade['entry']:.2f}")
         
@@ -409,10 +395,10 @@ def display_last_trades(df_trades, count):
         print(f"    SL:     {trade['sl']:.2f} {sl_status}")
         
         if pd.notna(trade.get('tp1')):
-            tp1_status = "✓ HIT" if pd.notna(trade.get('tp1_time')) else "✗ not hit"
+            tp1_status = "[OK] HIT" if pd.notna(trade.get('tp1_time')) else "[X] not hit"
             print(f"    TP1:    {trade['tp1']:.2f} ({TP1_RR}R) {tp1_status}")
         
-        tp2_status = "✓ HIT" if pd.notna(trade.get('tp2_time')) else "✗ not hit"
+        tp2_status = "[OK] HIT" if pd.notna(trade.get('tp2_time')) else "[X] not hit"
         print(f"    TP2:    {trade['tp']:.2f} (POC) {tp2_status}")
         
         exit_label = ""
@@ -424,12 +410,10 @@ def display_last_trades(df_trades, count):
             exit_label = "(= TP2)"
         print(f"    Exit:   {trade['exit_price']:.2f} {exit_label}")
         
-        # Volume Profile
         print(f"\n  VOLUME PROFILE:")
         print(f"    VAH: {trade['vah_at_entry']:.2f} | POC: {trade['poc_at_entry']:.2f} | VAL: {trade['val_at_entry']:.2f}")
         print(f"    POC Strength: {trade['poc_strength']:.2f}x | Shape: {trade['vp_shape']}")
         
-        # Résultat
         risk_pts = abs(trade['entry'] - trade['sl'])
         print(f"\n  RÉSULTAT:")
         print(f"    R:R Potentiel: {trade['rr']:.2f}")
@@ -457,7 +441,6 @@ def display_last_trades(df_trades, count):
 
 
 def display_open_trades(assets_data, current_capital):
-    """Affiche les trades actuellement ouverts (non clôturés)"""
     open_trades = []
     
     for symbol, data in assets_data.items():
@@ -491,10 +474,10 @@ def display_open_trades(assets_data, current_capital):
         breakout_time = trade['breakout_time'].strftime('%H:%M') if trade.get('breakout_time') else "N/A"
         
         if partial_closed:
-            status = "🟡 TP1 HIT - SL @ BE"
+            status = "[PARTIAL] TP1 HIT - SL @ BE"
             sl_display = f"{sl:.2f} (moved to BE)"
         else:
-            status = "🔵 En attente TP1"
+            status = "[OPEN] En attente TP1"
             sl_display = f"{sl:.2f}"
         
         print(f"\n{'─' * 100}")
@@ -507,9 +490,9 @@ def display_open_trades(assets_data, current_capital):
         print(f"    Entry:      {entry:.2f}")
         print(f"    SL:         {sl_display}")
         if tp1:
-            tp1_status = "✓ HIT" if partial_closed else "⏳ pending"
+            tp1_status = "[OK] HIT" if partial_closed else "[PENDING]"
             print(f"    TP1:        {tp1:.2f} ({TP1_RR}R) {tp1_status}")
-        print(f"    TP2 (POC):  {tp2:.2f} ⏳ pending")
+        print(f"    TP2 (POC):  {tp2:.2f} [PENDING]")
         
         print(f"\n  VOLUME PROFILE:")
         print(f"    VAH: {trade.get('vah_at_entry', 0):.2f} | POC: {trade.get('poc_at_entry', 0):.2f} | VAL: {trade.get('val_at_entry', 0):.2f}")
@@ -531,6 +514,239 @@ def display_open_trades(assets_data, current_capital):
             print(f"    Si SL:      -1.00R (${-risk_amount:.2f})")
 
 
+def check_prop_firm_rules(df_trades, initial_capital):
+    """
+    Vérifie la conformité aux règles prop firm
+    Retourne un dictionnaire avec les résultats de chaque vérification
+    """
+    rules = PROP_FIRM_RULES
+    results = {
+        'compliant': True,
+        'violations': [],
+        'checks': {}
+    }
+    
+    if df_trades.empty:
+        return results
+    
+    # Créer une copie pour ne pas modifier le DataFrame original
+    df_trades_copy = df_trades.copy()
+    
+    # Préparer les données par jour
+    df_trades_copy['date_only'] = pd.to_datetime(df_trades_copy['date']).dt.date
+    daily_stats = df_trades_copy.groupby('date_only').agg({
+        'pnl': 'sum',
+        'capital_after': 'last'
+    }).reset_index()
+    
+    # Calculer le capital de début de journée pour chaque jour
+    daily_stats['day_start_capital'] = daily_stats['capital_after'].shift(1).fillna(initial_capital)
+    
+    # 1. Vérifier Max Daily DD < 3%
+    daily_stats['day_high'] = daily_stats.groupby(daily_stats.index)['capital_after'].cummax()
+    daily_stats['daily_dd_amount'] = 0.0
+    daily_stats['daily_dd_percent'] = 0.0
+    
+    for date in daily_stats['date_only'].unique():
+        day_trades = df_trades_copy[df_trades_copy['date_only'] == date].sort_values('entry_time')
+        if len(day_trades) == 0:
+            continue
+        
+        day_start = daily_stats[daily_stats['date_only'] == date]['day_start_capital'].iloc[0]
+        day_high = day_start
+        max_dd = 0.0
+        
+        for _, trade in day_trades.iterrows():
+            if trade['capital_after'] > day_high:
+                day_high = trade['capital_after']
+            dd = day_high - trade['capital_after']
+            if dd > max_dd:
+                max_dd = dd
+        
+        dd_percent = (max_dd / day_high * 100) if day_high > 0 else 0
+        daily_stats.loc[daily_stats['date_only'] == date, 'daily_dd_amount'] = max_dd
+        daily_stats.loc[daily_stats['date_only'] == date, 'daily_dd_percent'] = dd_percent
+        
+        if dd_percent > rules['max_daily_dd_percent']:
+            results['compliant'] = False
+            results['violations'].append(
+                f"[X] Daily DD violated on {date}: {dd_percent:.2f}% (max: {rules['max_daily_dd_percent']}%)"
+            )
+    
+    max_daily_dd = daily_stats['daily_dd_percent'].max()
+    results['checks']['max_daily_dd'] = {
+        'value': max_daily_dd,
+        'limit': rules['max_daily_dd_percent'],
+        'passed': max_daily_dd <= rules['max_daily_dd_percent']
+    }
+    
+    # 2. Vérifier Max Total DD < 5%
+    max_total_dd = df_trades['drawdown'].max()
+    max_total_dd_percent = (max_total_dd / df_trades['high_water_mark'].max() * 100) if df_trades['high_water_mark'].max() > 0 else 0
+    
+    results['checks']['max_total_dd'] = {
+        'value': max_total_dd_percent,
+        'limit': rules['max_total_dd_percent'],
+        'passed': max_total_dd_percent <= rules['max_total_dd_percent']
+    }
+    
+    if max_total_dd_percent > rules['max_total_dd_percent']:
+        results['compliant'] = False
+        results['violations'].append(
+            f"[X] Total DD violated: {max_total_dd_percent:.2f}% (max: {rules['max_total_dd_percent']}%)"
+        )
+    
+    # 3. Vérifier qu'aucun jour ne dépasse 15% du profit total
+    total_profit = df_trades['pnl'].sum()
+    if total_profit > 0:
+        daily_stats['day_profit_percent'] = (daily_stats['pnl'] / total_profit * 100).abs()
+        max_day_contribution = daily_stats['day_profit_percent'].max()
+        
+        results['checks']['max_day_profit'] = {
+            'value': max_day_contribution,
+            'limit': rules['max_day_profit_percent'],
+            'passed': max_day_contribution <= rules['max_day_profit_percent']
+        }
+        
+        if max_day_contribution > rules['max_day_profit_percent']:
+            worst_day = daily_stats.loc[daily_stats['day_profit_percent'].idxmax(), 'date']
+            results['compliant'] = False
+            results['violations'].append(
+                f"[X] Single day profit too high on {worst_day}: {max_day_contribution:.2f}% of total (max: {rules['max_day_profit_percent']}%)"
+            )
+    else:
+        results['checks']['max_day_profit'] = {
+            'value': 0,
+            'limit': rules['max_day_profit_percent'],
+            'passed': True
+        }
+    
+    # 4. Vérifier au moins 7 jours avec gain >= 0.25% sur toute période de 30 jours
+    min_gain_threshold = rules.get('min_daily_gain_percent', 0.25)
+    daily_stats['day_gain_percent'] = (daily_stats['pnl'] / daily_stats['day_start_capital'] * 100)
+    daily_stats['is_qualifying_day'] = daily_stats['day_gain_percent'] >= min_gain_threshold
+    
+    all_dates = pd.date_range(start=daily_stats['date_only'].min(), end=daily_stats['date_only'].max(), freq='D')
+    daily_complete = pd.DataFrame({'date_only': all_dates.date})
+    daily_complete = daily_complete.merge(daily_stats[['date_only', 'is_qualifying_day']], on='date_only', how='left')
+    daily_complete['is_qualifying_day'] = daily_complete['is_qualifying_day'].fillna(False)
+    
+    min_qualifying_days_in_window = float('inf')
+    worst_window_start = None
+    total_days = len(daily_complete)
+    
+    if total_days >= 30:
+        for i in range(len(daily_complete) - 29):
+            window = daily_complete.iloc[i:i+30]
+            qualifying_days = window['is_qualifying_day'].sum()
+            
+            if qualifying_days < min_qualifying_days_in_window:
+                min_qualifying_days_in_window = qualifying_days
+                worst_window_start = window['date_only'].iloc[0]
+        
+        results['checks']['min_positive_days'] = {
+            'value': int(min_qualifying_days_in_window),
+            'limit': rules['min_positive_days'],
+            'passed': min_qualifying_days_in_window >= rules['min_positive_days']
+        }
+        
+        if min_qualifying_days_in_window < rules['min_positive_days']:
+            results['compliant'] = False
+            results['violations'].append(
+                f"[X] Insufficient qualifying days (>= +{min_gain_threshold}%) in 30-day window starting {worst_window_start}: {int(min_qualifying_days_in_window)} days (min: {rules['min_positive_days']})"
+            )
+    else:
+        total_qualifying_days = daily_complete['is_qualifying_day'].sum()
+        results['checks']['min_positive_days'] = {
+            'value': int(total_qualifying_days),
+            'limit': rules['min_positive_days'],
+            'passed': None,
+            'note': f'Insufficient data for 30-day window ({total_days} days total)'
+        }
+    
+    # 5. Vérifier que >= 50% des trades durent > 1 minute
+    min_duration_threshold = rules.get('min_trade_duration_above_1min_percent', 50.0)
+    if 'trade_duration_min' in df_trades.columns:
+        trades_above_1min = (df_trades['trade_duration_min'] > 1.0).sum()
+        total_trades = len(df_trades)
+        pct_above_1min = (trades_above_1min / total_trades * 100) if total_trades > 0 else 0
+        
+        results['checks']['trade_duration'] = {
+            'value': pct_above_1min,
+            'limit': min_duration_threshold,
+            'passed': pct_above_1min >= min_duration_threshold,
+            'trades_above_1min': int(trades_above_1min),
+            'total_trades': total_trades
+        }
+        
+        if pct_above_1min < min_duration_threshold:
+            results['compliant'] = False
+            results['violations'].append(
+                f"[X] Trade duration rule violated: {pct_above_1min:.1f}% trades > 1min (min: {min_duration_threshold}%)"
+            )
+    
+    return results
+
+
+def display_prop_firm_compliance(compliance_results):
+    """Affiche les résultats de conformité prop firm"""
+    print(f"\n{'=' * 120}")
+    print("VÉRIFICATION CONFORMITÉ PROP FIRM")
+    print(f"{'=' * 120}")
+    
+    if compliance_results['compliant']:
+        print("\n[OK] CONFORME - Toutes les règles prop firm sont respectées!\n")
+    else:
+        print("\n[FAIL] NON CONFORME - Violations détectées:\n")
+        for violation in compliance_results['violations']:
+            print(f"   {violation}")
+        print()
+    
+    print(f"{'─' * 60}")
+    print("DÉTAIL DES VÉRIFICATIONS")
+    print(f"{'─' * 60}")
+    
+    # 1. Max Daily DD
+    check = compliance_results['checks'].get('max_daily_dd', {})
+    status = "[OK]" if check.get('passed') else "[FAIL]"
+    print(f"\n{status} Max Daily Drawdown:")
+    print(f"   Valeur: {check.get('value', 0):.2f}% | Limite: {check.get('limit', 0):.2f}%")
+    
+    # 2. Max Total DD
+    check = compliance_results['checks'].get('max_total_dd', {})
+    status = "[OK]" if check.get('passed') else "[FAIL]"
+    print(f"\n{status} Max Total Drawdown:")
+    print(f"   Valeur: {check.get('value', 0):.2f}% | Limite: {check.get('limit', 0):.2f}%")
+    
+    # 3. Max Day Profit
+    check = compliance_results['checks'].get('max_day_profit', {})
+    status = "[OK]" if check.get('passed') else "[FAIL]"
+    print(f"\n{status} Max Single Day Profit:")
+    print(f"   Valeur: {check.get('value', 0):.2f}% du total | Limite: {check.get('limit', 0):.2f}%")
+    
+    # 4. Min Positive Days
+    check = compliance_results['checks'].get('min_positive_days', {})
+    if check.get('passed') is None:
+        status = "[WARN]"
+        note = f" ({check.get('note', 'N/A')})"
+    else:
+        status = "[OK]" if check.get('passed') else "[FAIL]"
+        note = ""
+    min_gain = PROP_FIRM_RULES.get('min_daily_gain_percent', 0.25)
+    print(f"\n{status} Jours Qualifiants (>= +{min_gain}% sur 30j):")
+    print(f"   Valeur: {check.get('value', 0)} jours | Minimum: {check.get('limit', 0)} jours{note}")
+    
+    # 5. Trade Duration
+    check = compliance_results['checks'].get('trade_duration', {})
+    if check:
+        status = "[OK]" if check.get('passed') else "[FAIL]"
+        print(f"\n{status} Durée des Trades (> 1 minute):")
+        print(f"   Trades > 1min: {check.get('trades_above_1min', 0)} / {check.get('total_trades', 0)} ({check.get('value', 0):.1f}%)")
+        print(f"   Minimum requis: {check.get('limit', 0):.0f}%")
+    
+    print(f"\n{'=' * 120}")
+
+
 def run_backtest():
     conn = get_db_connection()
     enabled_assets = [a for a in ASSETS if a.get('enabled', True)]
@@ -543,9 +759,7 @@ def run_backtest():
     for asset in enabled_assets:
         df_candles, df_ticks = load_all_data(conn, asset)
         if not df_candles.empty:
-            # Grouper les ticks par minute AVEC les timestamps pour filtrage ultérieur
             df_ticks['minute'] = df_ticks['time'].dt.floor('T')
-            # Stocker (prices, volumes, timestamps) pour chaque minute
             ticks_by_minute = df_ticks.groupby('minute').apply(
                 lambda g: (g['price'].values, g['volume'].values, g['time'].values)
             ).to_dict()
@@ -555,7 +769,7 @@ def run_backtest():
                 'vp': IncrementalVolumeProfile(tick_size=asset['tick_size'], va_percent=asset['va_percent']),
                 'state': "INSIDE", 'swing_extreme': 0.0, 'active_trade': None,
                 'breakout_time': None, 'breakout_price': None, 'current_session': None,
-                'session_start_dt': None,  # Nouveau: début exact de la session courante
+                'session_start_dt': None,
             }
             print(f"   + {asset['symbol']}: {len(df_candles):,} candles | {len(df_ticks):,} ticks")
     conn.close()
@@ -581,7 +795,6 @@ def run_backtest():
     filtered_by_vp_shape = 0
     total_potential_entries = 0
     
-    # Tracking journalier
     current_day = None
     day_start_capital = INITIAL_CAPITAL
     day_trades = 0
@@ -590,7 +803,6 @@ def run_backtest():
     day_high_water = INITIAL_CAPITAL
     day_max_dd = 0.0
     
-    # Tracking hebdomadaire
     current_week = None
     week_start_capital = INITIAL_CAPITAL
     week_trades = 0
@@ -599,7 +811,6 @@ def run_backtest():
     week_high_water = INITIAL_CAPITAL
     week_max_dd = 0.0
     
-    # Tracking mensuel
     current_month = None
     month_start_capital = INITIAL_CAPITAL
     month_trades = 0
@@ -643,11 +854,11 @@ def run_backtest():
     if DISPLAY_MODE != "NONE":
         print("=" * 120)
         if DISPLAY_MODE == "DAILY":
-            print(f"{'DATE':<12} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'CAPITAL':>14} | {'DAY DD%':>8} | {'MAX DD%':>8}")
+            print(f"{'DATE':<12} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'PnL %':>7} | {'CAPITAL':>14} | {'DAY DD%':>8} | {'MAX DD%':>8}")
         elif DISPLAY_MODE == "WEEKLY":
-            print(f"{'SEMAINE':<12} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'CAPITAL':>14} | {'WK DD%':>8} | {'MAX DD%':>8}")
+            print(f"{'SEMAINE':<12} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'PnL %':>7} | {'CAPITAL':>14} | {'WK DD%':>8} | {'MAX DD%':>8}")
         elif DISPLAY_MODE == "MONTHLY":
-            print(f"{'MOIS':<10} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'CAPITAL':>14} | {'MTH DD%':>8} | {'MAX DD%':>8}")
+            print(f"{'MOIS':<10} | {'TRADES':>6} | {'WIN':>4} | {'LOSS':>4} | {'WR%':>6} | {'PnL R':>8} | {'PnL %':>7} | {'CAPITAL':>14} | {'MTH DD%':>8} | {'MAX DD%':>8}")
         print("-" * 120)
     
     t_start = time.time()
@@ -662,12 +873,12 @@ def run_backtest():
         row_week = row_week_start.strftime('%Y-%m-%d')
         row_month = row.dt.strftime('%Y-%m')
         
-        # Gestion du changement de jour
         if current_day is not None and row_day != current_day:
             if DISPLAY_MODE == "DAILY" and day_trades > 0:
                 day_wr = (day_wins / day_trades * 100) if day_trades > 0 else 0
                 day_max_dd_pct = (day_max_dd / day_high_water * 100) if day_high_water > 0 else 0
-                print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+                day_pnl_pct = ((current_capital - day_start_capital) / day_start_capital * 100) if day_start_capital > 0 else 0
+                print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | {day_pnl_pct:>+6.2f}% | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             day_start_capital = current_capital
             day_trades = 0
             day_wins = 0
@@ -675,12 +886,12 @@ def run_backtest():
             day_high_water = current_capital
             day_max_dd = 0.0
         
-        # Gestion du changement de semaine
         if current_week is not None and row_week != current_week:
             if DISPLAY_MODE == "WEEKLY" and week_trades > 0:
                 week_wr = (week_wins / week_trades * 100) if week_trades > 0 else 0
                 week_max_dd_pct = (week_max_dd / week_high_water * 100) if week_high_water > 0 else 0
-                print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+                week_pnl_pct = ((current_capital - week_start_capital) / week_start_capital * 100) if week_start_capital > 0 else 0
+                print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | {week_pnl_pct:>+6.2f}% | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             week_start_capital = current_capital
             week_trades = 0
             week_wins = 0
@@ -688,12 +899,12 @@ def run_backtest():
             week_high_water = current_capital
             week_max_dd = 0.0
         
-        # Gestion du changement de mois
         if current_month is not None and row_month != current_month:
             if DISPLAY_MODE == "MONTHLY" and month_trades > 0:
                 month_wr = (month_wins / month_trades * 100) if month_trades > 0 else 0
                 month_max_dd_pct = (month_max_dd / month_high_water * 100) if month_high_water > 0 else 0
-                print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+                month_pnl_pct = ((current_capital - month_start_capital) / month_start_capital * 100) if month_start_capital > 0 else 0
+                print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | {month_pnl_pct:>+6.2f}% | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             month_start_capital = current_capital
             month_trades = 0
             month_wins = 0
@@ -705,7 +916,44 @@ def run_backtest():
         current_week = row_week
         current_month = row_month
         
-        # Gestion des trades actifs
+        # =================================================================
+        # ÉTAPE 1: SESSION DETECTION & VP UPDATE
+        # TOUJOURS exécuté, même avec un trade actif
+        # (aligné sur le live qui reconstruit le VP à chaque bougie)
+        # =================================================================
+        curr_sess = get_session(row.dt)
+        asset_sessions = config.get('sessions', {})
+        
+        if RESET_VP_PER_SESSION:
+            session_start = is_session_start(row.dt)
+            if session_start and asset_sessions.get(session_start, False):
+                asset_data['vp'].reset()
+                asset_data['state'] = "INSIDE"
+                asset_data['swing_extreme'] = 0.0
+                asset_data['current_session'] = session_start
+                asset_data['session_start_dt'] = get_session_start_time(session_start, row.dt)
+        else:
+            if row.dt.hour in [23, 0]:
+                asset_data['vp'].reset()
+                asset_data['state'] = "INSIDE"
+                asset_data['swing_extreme'] = 0.0
+        
+        # Ajouter les ticks au VP (TOUJOURS, même pendant un trade actif)
+        if asset_sessions.get(curr_sess, False):
+            if current_minute in asset_data['ticks_by_minute']:
+                prices, volumes, timestamps = asset_data['ticks_by_minute'][current_minute]
+                session_start_dt = asset_data.get('session_start_dt')
+                if session_start_dt is not None:
+                    session_start_np = np.datetime64(session_start_dt)
+                    mask = timestamps >= session_start_np
+                    if mask.any():
+                        asset_data['vp'].add_ticks(prices[mask], volumes[mask])
+                else:
+                    asset_data['vp'].add_ticks(prices, volumes)
+        
+        # =================================================================
+        # ÉTAPE 2: GESTION DES TRADES ACTIFS
+        # =================================================================
         active_trade = asset_data['active_trade']
         if active_trade:
             res = None
@@ -810,6 +1058,11 @@ def run_backtest():
                 if month_dd > month_max_dd:
                     month_max_dd = month_dd
                 
+                # Calculer la durée du trade en minutes
+                trade_duration_min = 0.0
+                if active_trade.get('entry_time') and active_trade.get('exit_time'):
+                    trade_duration_min = (active_trade['exit_time'] - active_trade['entry_time']).total_seconds() / 60.0
+                
                 all_trades.append({
                     'symbol': symbol, 'date': row.dt,
                     'entry_hour': active_trade.get('entry_time').hour if active_trade.get('entry_time') else row.dt.hour,
@@ -825,55 +1078,19 @@ def run_backtest():
                     'val_at_entry': active_trade.get('val_at_entry'), 'poc_at_entry': active_trade.get('poc_at_entry'),
                     'rr': active_trade['rr'], 'result': res, 'pnl': pnl, 'pnl_r': pnl_r,
                     'capital_after': current_capital, 'high_water_mark': high_water_mark,
-                    'drawdown': high_water_mark - current_capital
+                    'drawdown': high_water_mark - current_capital,
+                    'trade_duration_min': trade_duration_min,
                 })
                 asset_data['active_trade'] = None
             else:
                 continue
         
-        curr_sess = get_session(row.dt)
-        asset_sessions = config.get('sessions', {})
-        
-        # =====================================================================
-        # RESET VP PAR SESSION - CORRECTION ALIGNÉE SUR LE LIVE
-        # =====================================================================
-        if RESET_VP_PER_SESSION:
-            session_start = is_session_start(row.dt)
-            if session_start and asset_sessions.get(session_start, False):
-                asset_data['vp'].reset()
-                asset_data['state'] = "INSIDE"
-                asset_data['swing_extreme'] = 0.0
-                asset_data['current_session'] = session_start
-                # Calculer le début exact de cette session (avec les minutes)
-                asset_data['session_start_dt'] = get_session_start_time(session_start, row.dt)
-        else:
-            if row.dt.hour in [23, 0]:
-                asset_data['vp'].reset()
-                asset_data['state'] = "INSIDE"
-                asset_data['swing_extreme'] = 0.0
-                continue
-        
+        # =================================================================
+        # ÉTAPE 3: STATE MACHINE (seulement si pas de trade actif)
+        # =================================================================
         if not asset_sessions.get(curr_sess, False):
             asset_data['state'] = "INSIDE"
             continue
-        
-        # =====================================================================
-        # AJOUT DES TICKS AU VP - OPTIMISÉ: Filtrer par timestamp sans accès DataFrame
-        # =====================================================================
-        if current_minute in asset_data['ticks_by_minute']:
-            prices, volumes, timestamps = asset_data['ticks_by_minute'][current_minute]
-            
-            # Si on a un session_start_dt défini, filtrer les ticks
-            session_start_dt = asset_data.get('session_start_dt')
-            if session_start_dt is not None:
-                # Convertir session_start_dt en numpy datetime64 pour comparaison rapide
-                session_start_np = np.datetime64(session_start_dt)
-                mask = timestamps >= session_start_np
-                if mask.any():
-                    asset_data['vp'].add_ticks(prices[mask], volumes[mask])
-            else:
-                # Pas de session_start_dt, ajouter tous les ticks
-                asset_data['vp'].add_ticks(prices, volumes)
         
         poc, vah, val = asset_data['vp'].get_levels()
         if poc is None:
@@ -993,21 +1210,23 @@ def run_backtest():
                         }
                 asset_data['state'] = "INSIDE"
     
-    # Affichage de la dernière période
     if DISPLAY_MODE == "DAILY" and day_trades > 0:
         day_wr = (day_wins / day_trades * 100) if day_trades > 0 else 0
         day_max_dd_pct = (day_max_dd / day_high_water * 100) if day_high_water > 0 else 0
-        print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+        day_pnl_pct = ((current_capital - day_start_capital) / day_start_capital * 100) if day_start_capital > 0 else 0
+        print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | {day_pnl_pct:>+6.2f}% | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
     
     if DISPLAY_MODE == "WEEKLY" and week_trades > 0:
         week_wr = (week_wins / week_trades * 100) if week_trades > 0 else 0
         week_max_dd_pct = (week_max_dd / week_high_water * 100) if week_high_water > 0 else 0
-        print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+        week_pnl_pct = ((current_capital - week_start_capital) / week_start_capital * 100) if week_start_capital > 0 else 0
+        print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | {week_pnl_pct:>+6.2f}% | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
     
     if DISPLAY_MODE == "MONTHLY" and month_trades > 0:
         month_wr = (month_wins / month_trades * 100) if month_trades > 0 else 0
         month_max_dd_pct = (month_max_dd / month_high_water * 100) if month_high_water > 0 else 0
-        print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
+        month_pnl_pct = ((current_capital - month_start_capital) / month_start_capital * 100) if month_start_capital > 0 else 0
+        print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | {month_pnl_pct:>+6.2f}% | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
     
     elapsed = time.time() - t_start
     
@@ -1020,6 +1239,16 @@ def run_backtest():
         return
     
     df_trades = pd.DataFrame(all_trades)
+    
+    # =========================================================================
+    # VÉRIFICATION CONFORMITÉ PROP FIRM
+    # =========================================================================
+    compliance_results = check_prop_firm_rules(df_trades, INITIAL_CAPITAL)
+    display_prop_firm_compliance(compliance_results)
+    
+    # =========================================================================
+    # STATISTIQUES CLASSIQUES
+    # =========================================================================
     total_trades = len(df_trades)
     wins = len(df_trades[df_trades['result'] == 'WIN'])
     be_trades = len(df_trades[df_trades['result'] == 'BE'])
@@ -1042,7 +1271,10 @@ def run_backtest():
     max_losing_streak = losing_streaks.max() if len(losing_streaks) > 0 else 0
     max_winning_streak = winning_streaks.max() if len(winning_streaks) > 0 else 0
     recovery_factor = total_pnl / max_dd_amount if max_dd_amount > 0 else float('inf')
-    trading_days = df_trades['date'].dt.date.nunique()
+    if df_trades['date'].dtype == 'object':
+        trading_days = df_trades['date'].nunique()
+    else:
+        trading_days = pd.to_datetime(df_trades['date']).dt.date.nunique()
     avg_trades_per_day = total_trades / trading_days if trading_days > 0 else 0
     
     print(f"\n{'─' * 60}")
@@ -1079,6 +1311,58 @@ def run_backtest():
     print(f"  Filtres (duree):      {filtered_by_duration:>14} ({filtered_by_duration/total_potential_entries*100 if total_potential_entries > 0 else 0:.1f}%)")
     print(f"  Filtres (POC faible): {filtered_by_poc_strength:>14} ({filtered_by_poc_strength/total_potential_entries*100 if total_potential_entries > 0 else 0:.1f}%)")
     print(f"  Filtres (VP Shape):   {filtered_by_vp_shape:>14} ({filtered_by_vp_shape/total_potential_entries*100 if total_potential_entries > 0 else 0:.1f}%)")
+    
+    # =========================================================================
+    # PERFORMANCE PAR DURÉE DE TRADE (PROP FIRM)
+    # =========================================================================
+    if 'trade_duration_min' in df_trades.columns:
+        print(f"\n{'─' * 60}")
+        print("PERFORMANCE PAR DURÉE DE TRADE")
+        print(f"{'─' * 60}")
+        avg_trade_duration = df_trades['trade_duration_min'].mean()
+        median_trade_duration = df_trades['trade_duration_min'].median()
+        min_trade_duration = df_trades['trade_duration_min'].min()
+        max_trade_duration = df_trades['trade_duration_min'].max()
+        trades_under_1min = (df_trades['trade_duration_min'] <= 1.0).sum()
+        trades_above_1min = (df_trades['trade_duration_min'] > 1.0).sum()
+        pct_above_1min = trades_above_1min / total_trades * 100
+        
+        print(f"  Durée moyenne:          {avg_trade_duration:>10.1f} min")
+        print(f"  Durée médiane:          {median_trade_duration:>10.1f} min")
+        print(f"  Durée min:              {min_trade_duration:>10.1f} min")
+        print(f"  Durée max:              {max_trade_duration:>10.1f} min")
+        print(f"  Trades <= 1 min:        {trades_under_1min:>10} ({trades_under_1min/total_trades*100:.1f}%)")
+        print(f"  Trades > 1 min:         {trades_above_1min:>10} ({pct_above_1min:.1f}%)")
+        
+        rule_threshold = PROP_FIRM_RULES.get('min_trade_duration_above_1min_percent', 50.0)
+        if pct_above_1min >= rule_threshold:
+            print(f"  Prop Firm (>{rule_threshold:.0f}% > 1min): [OK] CONFORME")
+        else:
+            print(f"  Prop Firm (>{rule_threshold:.0f}% > 1min): [FAIL] NON CONFORME ({pct_above_1min:.1f}% < {rule_threshold:.0f}%)")
+        
+        print(f"\n  Distribution par durée:")
+        duration_buckets = [
+            (0, 1, "0-1 min (rapides)"),
+            (1, 2, "1-2 min"),
+            (2, 5, "2-5 min"),
+            (5, 10, "5-10 min"),
+            (10, 30, "10-30 min"),
+            (30, 60, "30-60 min"),
+            (60, 240, "1h-4h"),
+            (240, 1440, "4h-24h"),
+            (1440, float('inf'), "> 24h"),
+        ]
+        for lo, hi, label in duration_buckets:
+            if hi == float('inf'):
+                bucket = df_trades[df_trades['trade_duration_min'] >= lo]
+            else:
+                bucket = df_trades[(df_trades['trade_duration_min'] >= lo) & (df_trades['trade_duration_min'] < hi)]
+            if len(bucket) > 0:
+                b_wins = len(bucket[bucket['result'].isin(['WIN', 'BE'])])
+                b_wr = b_wins / len(bucket) * 100
+                b_pnl = bucket['pnl_r'].sum()
+                b_avg = bucket['pnl_r'].mean()
+                print(f"     {label:<20}: {len(bucket):>4} trades ({len(bucket)/total_trades*100:>5.1f}%) | WR: {b_wr:>5.1f}% | PnL: {b_pnl:>+8.1f}R | Avg: {b_avg:>+5.2f}R")
     
     if 'poc_strength' in df_trades.columns:
         print(f"\n{'─' * 60}")
@@ -1168,6 +1452,34 @@ def run_backtest():
     print(f"  Max Serie Perdante:   {max_losing_streak:>14}")
     print(f"  Temps d'execution:    {elapsed:>13.2f}s")
     
+    # Stats sur les jours qualifiants (prop firm)
+    df_trades['date_only'] = pd.to_datetime(df_trades['date']).dt.date
+    daily_pnl = df_trades.groupby('date_only').agg({'pnl': 'sum', 'capital_after': 'last'}).reset_index()
+    daily_pnl['day_start_capital'] = daily_pnl['capital_after'].shift(1).fillna(INITIAL_CAPITAL)
+    daily_pnl['day_gain_percent'] = (daily_pnl['pnl'] / daily_pnl['day_start_capital'] * 100)
+    min_gain_threshold = PROP_FIRM_RULES.get('min_daily_gain_percent', 0.25)
+    qualifying_days = (daily_pnl['day_gain_percent'] >= min_gain_threshold).sum()
+    positive_days = (daily_pnl['pnl'] > 0).sum()
+    negative_days = (daily_pnl['pnl'] < 0).sum()
+    be_days = (daily_pnl['pnl'] == 0).sum()
+    
+    print(f"\n{'─' * 60}")
+    print("STATISTIQUES JOURS (PROP FIRM)")
+    print(f"{'─' * 60}")
+    print(f"  Jours Qualifiants (>={min_gain_threshold}%): {qualifying_days:>8} / {trading_days} ({qualifying_days/trading_days*100:.1f}%)")
+    print(f"  Jours Positifs (>0):   {positive_days:>8} / {trading_days} ({positive_days/trading_days*100:.1f}%)")
+    print(f"  Jours Négatifs (<0):   {negative_days:>8} / {trading_days} ({negative_days/trading_days*100:.1f}%)")
+    if be_days > 0:
+        print(f"  Jours Break Even (=0): {be_days:>8} / {trading_days} ({be_days/trading_days*100:.1f}%)")
+    avg_daily_gain = daily_pnl['day_gain_percent'].mean()
+    median_daily_gain = daily_pnl['day_gain_percent'].median()
+    max_daily_gain = daily_pnl['day_gain_percent'].max()
+    min_daily_gain = daily_pnl['day_gain_percent'].min()
+    print(f"  Gain journalier moyen: {avg_daily_gain:>13.2f}%")
+    print(f"  Gain journalier médian:{median_daily_gain:>13.2f}%")
+    print(f"  Meilleur jour:         {max_daily_gain:>13.2f}%")
+    print(f"  Pire jour:             {min_daily_gain:>13.2f}%")
+    
     print(f"\n{'─' * 60}")
     print("BREAKDOWN PAR ASSET")
     print(f"{'─' * 60}")
@@ -1223,11 +1535,9 @@ def run_backtest():
         pf_str = f"{t_pf:.2f}" if t_pf != float('inf') else "inf"
         print(f"  {trade_type:<8} | {t_total:>7} trades | {t_wins:>5} W | {t_losses:>5} L | {t_wr:>5.1f}% | {t_pnl_r:>+8.1f}R | PF {pf_str}")
     
-    # Affichage des trades en cours si activé
     if SHOW_OPEN_TRADES:
         display_open_trades(assets_data, current_capital)
     
-    # Affichage des derniers trades si activé
     if SHOW_LAST_TRADES:
         display_last_trades(df_trades, LAST_TRADES_COUNT)
     

@@ -1,11 +1,11 @@
 {
   "XAUUSD": {
     "state": "INSIDE",
-    "swing_extreme": 4999.45,
-    "breakout_time": "2026-02-04T00:21:00+00:00",
-    "breakout_price": 4997.48,
-    "current_session": "TOKYO",
-    "last_trade_candle_ts": 1770164520000,
-    "last_candle_ts": 1770167100000
+    "swing_extreme": 4936.53,
+    "breakout_time": "2026-02-06T20:36:00+00:00",
+    "breakout_price": 4938.28,
+    "current_session": "NY",
+    "last_trade_candle_ts": 1770391620000,
+    "last_candle_ts": 1770414540000
   }
 }

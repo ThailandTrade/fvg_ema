@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Live Trading - VP Failed Breakout Strategy
-ALIGNÉ EXACTEMENT SUR LE BACKTEST
+ALIGNÉ EXACTEMENT SUR LE BACKTEST v3
 """
 
 import MetaTrader5 as mt5
@@ -33,31 +33,33 @@ MIN_RR = 2.0     # R:R minimum pour ENTRER en position
 
 # Trailing
 USE_TRAILING = True
-TP1_RR = 1.2      # R:R ou on ferme 50% et met BE
+TP1_RR = 1.3      # R:R ou on ferme 50% et met BE
 
 # Filtres globaux
 FILTER_ENTRY_VS_POC = True
 USE_BREAKOUT_DURATION_FILTER = True
 MAX_BREAKOUT_DURATION_MINUTES = 3
 USE_VP_STRUCTURE_FILTER = True
-MIN_POC_STRENGTH = 2.5
+MIN_POC_STRENGTH = 3.0
 USE_VP_SHAPE_FILTER = True
-EXCLUDED_VP_SHAPES = ["P-SHAPE"]
+EXCLUDED_VP_SHAPES = [""]
 
 # Reset VP
 RESET_VP_PER_SESSION = True
 
 # =============================================================================
 # CONFIGURATION DES HEURES DE SESSION (UTC)
+# vp_start/vp_end : heures pour collecter les ticks et construire le VP
+# trade_start/trade_end : heures où les entrées en position sont autorisées
 # =============================================================================
 SESSIONS_CONFIG = {
-    'TOKYO':  {'start': 0,    'end': 4},     # 0h00 - 4h00 UTC
-    'LONDON': {'start': 8,    'end': 13},    # 8h00 - 13h00 UTC
-    'NY':     {'start': 14.5, 'end': 21},    # 14h30 - 21h00 UTC
+    'TOKYO':  {'vp_start': 0,    'vp_end': 4,    'trade_start': 0,    'trade_end': 4},
+    'LONDON': {'vp_start': 8,    'vp_end': 14.5,   'trade_start': 9,    'trade_end': 14},
+    'NY':     {'vp_start': 14.5, 'vp_end': 21.5,   'trade_start': 15, 'trade_end': 21},
 }
 
 # =============================================================================
-# CONFIGURATION PAR ASSET - sl_offset = 0.10 pour tous (comme backtest)
+# CONFIGURATION PAR ASSET
 # =============================================================================
 ASSETS = [
     {
@@ -70,7 +72,7 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 0.10,
+        'sl_offset': 0.50,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
     },
     {
@@ -83,7 +85,7 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 0.10,
+        'sl_offset': 1.0,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': True},
     },
     {
@@ -96,7 +98,7 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': False,
         'allow_short': True,
-        'sl_offset': 0.10,
+        'sl_offset': 1.0,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
     },
     {
@@ -109,7 +111,7 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 0.10,
+        'sl_offset': 1.0,
         'sessions': {'TOKYO': True, 'LONDON': False, 'NY': True},
     },
     {
@@ -122,7 +124,7 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': False,
-        'sl_offset': 0.10,
+        'sl_offset': 1.0,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
     },
     {
@@ -195,17 +197,6 @@ def fetch_candles_from_db(engine, table_name: str, limit: int = 60):
     if df.empty:
         return []
     df = df.sort_values('ts').reset_index(drop=True)
-    df['dt'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
-    return df.to_dict('records')
-
-
-def fetch_candles_since(engine, table_name: str, since_dt: datetime):
-    """Charge toutes les candles depuis une datetime"""
-    ts_start = int(since_dt.timestamp() * 1000)
-    query = f"SELECT ts, open, high, low, close FROM {table_name} WHERE ts >= {ts_start} ORDER BY ts ASC"
-    df = pd.read_sql(query, engine)
-    if df.empty:
-        return []
     df['dt'] = pd.to_datetime(df['ts'], unit='ms', utc=True)
     return df.to_dict('records')
 
@@ -323,20 +314,30 @@ class IncrementalVolumeProfile:
 # =============================================================================
 
 def get_session(dt):
+    """Retourne le nom de la session VP active pour un datetime donné."""
     h = dt.hour + dt.minute / 60.0
     for sess_name, cfg in SESSIONS_CONFIG.items():
-        if cfg['start'] <= h < cfg['end']:
+        if cfg['vp_start'] <= h < cfg['vp_end']:
             return sess_name
     return "AUTRE"
 
 
 def is_session_start(dt):
-    """Identique au backtest: current_time == cfg['start']"""
+    """Vérifie si le datetime correspond au début exact d'une session VP."""
     current_time = dt.hour + dt.minute / 60.0
     for sess_name, cfg in SESSIONS_CONFIG.items():
-        if current_time == cfg['start']:
+        if current_time == cfg['vp_start']:
             return sess_name
     return None
+
+
+def can_trade_now(dt, session_name: str) -> bool:
+    """Vérifie si on peut trader à ce moment (dans les heures trade de la session)."""
+    if session_name not in SESSIONS_CONFIG:
+        return False
+    cfg = SESSIONS_CONFIG[session_name]
+    current_time = dt.hour + dt.minute / 60.0
+    return cfg['trade_start'] <= current_time < cfg['trade_end']
 
 
 # =============================================================================
@@ -539,7 +540,7 @@ def daily_market_close_guard(candle_dt: datetime) -> bool:
 
 
 # =============================================================================
-# ASSET STATE - Sans WAITING_REENTRY (comme backtest)
+# ASSET STATE
 # =============================================================================
 
 class AssetState:
@@ -548,7 +549,7 @@ class AssetState:
         self.symbol = config['symbol']
         self.mt5_symbol = config['mt5_symbol']
         self.vp = IncrementalVolumeProfile(tick_size=config['tick_size'], va_percent=config['va_percent'])
-        self.state = "INSIDE"  # INSIDE, BREAKOUT_UP, BREAKOUT_DOWN (pas de WAITING_REENTRY)
+        self.state = "INSIDE"
         self.swing_extreme = 0.0
         self.breakout_time = None
         self.breakout_price = None
@@ -610,7 +611,7 @@ def load_all_states(asset_states: dict):
 
 
 # =============================================================================
-# MAIN TRADING LOGIC - IDENTIQUE AU BACKTEST
+# MAIN TRADING LOGIC - ALIGNÉ SUR BACKTEST v3
 # =============================================================================
 
 def detect_and_trade(asset_state: AssetState, engine, account_balance: float) -> dict:
@@ -671,19 +672,19 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
     result['new_candle'] = True
     asset_state.last_candle_ts = candle_ts
     
-    # Déterminer la session
+    # Déterminer la session (basé sur vp_start/vp_end)
     curr_sess = get_session(candle_dt)
     result['session'] = curr_sess
     asset_sessions = config.get('sessions', {})
     
-    # Hors session -> INSIDE (comme backtest)
+    # Hors session -> INSIDE
     if not asset_sessions.get(curr_sess, False):
         asset_state.state = "INSIDE"
         result['state_after'] = "INSIDE"
         result['event'] = "OUT_OF_SESSION"
         return result
     
-    # Reset VP au debut de session (comme backtest)
+    # Reset VP au debut de session
     if RESET_VP_PER_SESSION:
         session_start = is_session_start(candle_dt)
         if session_start and asset_sessions.get(session_start, False):
@@ -693,9 +694,8 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
             result['event_details'] = session_start
     
     # Construire VP depuis debut de session jusqu'à FIN de la bougie actuelle
-    # Aligné sur backtest: à la bougie N, on inclut les ticks de 00:00 à N:59.999
     session_cfg = SESSIONS_CONFIG.get(curr_sess, {})
-    session_start_hour = session_cfg.get('start', 0)
+    session_start_hour = session_cfg.get('vp_start', 0)  # Utilise vp_start
     session_start_dt = candle_dt.replace(hour=int(session_start_hour), minute=int((session_start_hour % 1) * 60), second=0, microsecond=0)
     if session_start_dt > candle_dt:
         session_start_dt -= timedelta(days=1)
@@ -728,7 +728,7 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
     state = asset_state.state
     
     # ==========================================================================
-    # STATE MACHINE - IDENTIQUE AU BACKTEST
+    # STATE MACHINE
     # ==========================================================================
     
     if state == "INSIDE":
@@ -750,35 +750,30 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
             result['event'] = "INSIDE"
     
     elif state == "BREAKOUT_UP":
-        # Mettre à jour swing_extreme (comme backtest: max(swing_extreme, high))
         asset_state.swing_extreme = max(asset_state.swing_extreme, high)
         result['swing_extreme'] = asset_state.swing_extreme
         
         if close < vah:
-            # Failed breakout UP - évaluer SHORT (comme backtest)
+            # Failed breakout UP - évaluer SHORT
             breakout_duration_min = (candle_dt - asset_state.breakout_time).total_seconds() / 60.0
             
-            # Flags pour les filtres (comme backtest)
             duration_ok = True
             poc_strength_ok = True
             vp_shape_ok = True
             
-            # Filtre duration
             if USE_BREAKOUT_DURATION_FILTER:
                 if breakout_duration_min >= MAX_BREAKOUT_DURATION_MINUTES:
                     duration_ok = False
                     result['event'] = "FILTERED_DURATION"
                     result['event_details'] = f"{breakout_duration_min:.1f}min >= {MAX_BREAKOUT_DURATION_MINUTES}min"
             
-            # Filtre POC strength
             if USE_VP_STRUCTURE_FILTER:
                 if poc_strength is None or poc_strength < MIN_POC_STRENGTH:
                     poc_strength_ok = False
-                    if duration_ok:  # Ne log que si pas déjà filtré
+                    if duration_ok:
                         result['event'] = "FILTERED_POC_STRENGTH"
                         result['event_details'] = f"{poc_strength:.2f}x < {MIN_POC_STRENGTH}x"
             
-            # Filtre VP shape
             if USE_VP_SHAPE_FILTER:
                 if vp_shape in EXCLUDED_VP_SHAPES:
                     vp_shape_ok = False
@@ -786,16 +781,15 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                         result['event'] = "FILTERED_VP_SHAPE"
                         result['event_details'] = vp_shape
             
-            # Tous les filtres OK + allow_short (comme backtest)
-            if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_short']:
+            # Vérifier can_trade_now (heures de trade)
+            if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_short'] and can_trade_now(candle_dt, curr_sess):
                 sl = asset_state.swing_extreme + config['sl_offset']
                 risk = sl - close
                 
                 if TP_MODE == "POC":
                     tp = poc
                     actual_rr = (close - tp) / risk if risk > 0 else 0
-                    # Filtre RR aberrant (comme backtest: > 10)
-                    if actual_rr > 10:
+                    if actual_rr > 15:
                         result['event'] = "FILTERED_RR_ABERRANT"
                         result['event_details'] = f"RR={actual_rr:.1f}"
                         asset_state.state = "INSIDE"
@@ -809,7 +803,6 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                 rr_ok = actual_rr >= MIN_RR
                 
                 if risk > 0 and tp >= val and poc_ok and rr_ok:
-                    # TRADE VALID!
                     tp1 = close - (risk * TP1_RR)
                     tp2 = tp
                     risk_amount = account_balance * RISK_PERCENT
@@ -821,7 +814,6 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                     if success:
                         asset_state.last_trade_candle_ts = candle_ts
                 else:
-                    # Entry conditions not met
                     if result['event'] is None:
                         reasons = []
                         if risk <= 0: reasons.append(f"risk={risk:.2f}")
@@ -830,36 +822,35 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                         if not rr_ok: reasons.append(f"RR={actual_rr:.2f}<{MIN_RR}")
                         result['event'] = "FILTERED_ENTRY"
                         result['event_details'] = ", ".join(reasons)
+            elif duration_ok and poc_strength_ok and vp_shape_ok and config['allow_short'] and not can_trade_now(candle_dt, curr_sess):
+                # Filtré par les heures de trade
+                if result['event'] is None:
+                    result['event'] = "FILTERED_TRADE_HOURS"
+                    result['event_details'] = f"Outside trade hours for {curr_sess}"
             
-            # Retour à INSIDE (comme backtest)
             asset_state.state = "INSIDE"
         else:
-            # Toujours en breakout
             result['event'] = "STILL_BREAKOUT_UP"
             result['event_details'] = f"swing={asset_state.swing_extreme}"
     
     elif state == "BREAKOUT_DOWN":
-        # Mettre à jour swing_extreme (comme backtest: min(swing_extreme, low))
         asset_state.swing_extreme = min(asset_state.swing_extreme, low)
         result['swing_extreme'] = asset_state.swing_extreme
         
         if close > val:
-            # Failed breakout DOWN - évaluer LONG (comme backtest)
+            # Failed breakout DOWN - évaluer LONG
             breakout_duration_min = (candle_dt - asset_state.breakout_time).total_seconds() / 60.0
             
-            # Flags pour les filtres (comme backtest)
             duration_ok = True
             poc_strength_ok = True
             vp_shape_ok = True
             
-            # Filtre duration
             if USE_BREAKOUT_DURATION_FILTER:
                 if breakout_duration_min >= MAX_BREAKOUT_DURATION_MINUTES:
                     duration_ok = False
                     result['event'] = "FILTERED_DURATION"
                     result['event_details'] = f"{breakout_duration_min:.1f}min >= {MAX_BREAKOUT_DURATION_MINUTES}min"
             
-            # Filtre POC strength
             if USE_VP_STRUCTURE_FILTER:
                 if poc_strength is None or poc_strength < MIN_POC_STRENGTH:
                     poc_strength_ok = False
@@ -867,7 +858,6 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                         result['event'] = "FILTERED_POC_STRENGTH"
                         result['event_details'] = f"{poc_strength:.2f}x < {MIN_POC_STRENGTH}x"
             
-            # Filtre VP shape
             if USE_VP_SHAPE_FILTER:
                 if vp_shape in EXCLUDED_VP_SHAPES:
                     vp_shape_ok = False
@@ -875,16 +865,15 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                         result['event'] = "FILTERED_VP_SHAPE"
                         result['event_details'] = vp_shape
             
-            # Tous les filtres OK + allow_long (comme backtest)
-            if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_long']:
+            # Vérifier can_trade_now (heures de trade)
+            if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_long'] and can_trade_now(candle_dt, curr_sess):
                 sl = asset_state.swing_extreme - config['sl_offset']
                 risk = close - sl
                 
                 if TP_MODE == "POC":
                     tp = poc
                     actual_rr = (tp - close) / risk if risk > 0 else 0
-                    # Filtre RR aberrant (comme backtest: > 10)
-                    if actual_rr > 10:
+                    if actual_rr > 15:
                         result['event'] = "FILTERED_RR_ABERRANT"
                         result['event_details'] = f"RR={actual_rr:.1f}"
                         asset_state.state = "INSIDE"
@@ -898,7 +887,6 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                 rr_ok = actual_rr >= MIN_RR
                 
                 if risk > 0 and tp <= vah and poc_ok and rr_ok:
-                    # TRADE VALID!
                     tp1 = close + (risk * TP1_RR)
                     tp2 = tp
                     risk_amount = account_balance * RISK_PERCENT
@@ -910,7 +898,6 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                     if success:
                         asset_state.last_trade_candle_ts = candle_ts
                 else:
-                    # Entry conditions not met
                     if result['event'] is None:
                         reasons = []
                         if risk <= 0: reasons.append(f"risk={risk:.2f}")
@@ -919,11 +906,14 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                         if not rr_ok: reasons.append(f"RR={actual_rr:.2f}<{MIN_RR}")
                         result['event'] = "FILTERED_ENTRY"
                         result['event_details'] = ", ".join(reasons)
+            elif duration_ok and poc_strength_ok and vp_shape_ok and config['allow_long'] and not can_trade_now(candle_dt, curr_sess):
+                # Filtré par les heures de trade
+                if result['event'] is None:
+                    result['event'] = "FILTERED_TRADE_HOURS"
+                    result['event_details'] = f"Outside trade hours for {curr_sess}"
             
-            # Retour à INSIDE (comme backtest)
             asset_state.state = "INSIDE"
         else:
-            # Toujours en breakout
             result['event'] = "STILL_BREAKOUT_DOWN"
             result['event_details'] = f"swing={asset_state.swing_extreme}"
     
@@ -932,13 +922,12 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
 
 
 def log_candle_info(result: dict, balance: float, equity: float):
-    """Log les infos importantes (pas INSIDE, OUT_OF_SESSION, STILL_BREAKOUT)"""
+    """Log les infos importantes"""
     if not result['new_candle']:
         return
     
     event = result['event'] or "NONE"
     
-    # Ne pas logger ces événements
     if event in ["INSIDE", "OUT_OF_SESSION", "STILL_BREAKOUT_UP", "STILL_BREAKOUT_DOWN"]:
         return
     
@@ -989,8 +978,8 @@ def log_candle_info(result: dict, balance: float, equity: float):
 
 def main():
     logger.info("=" * 60)
-    logger.info("VP Failed Breakout - Live Trading")
-    logger.info("ALIGNÉ SUR BACKTEST")
+    logger.info("VP Failed Breakout - Live Trading v3")
+    logger.info("ALIGNÉ SUR BACKTEST - VP/Trade hours séparés")
     logger.info("=" * 60)
     
     if not mt5.initialize():
@@ -1020,6 +1009,11 @@ def main():
         logger.info(f"Asset: {config['symbol']} | Sessions: {sessions}")
     
     load_all_states(asset_states)
+    
+    # Afficher la config des sessions
+    logger.info("Sessions config (VP hours / Trade hours):")
+    for sess_name, cfg in SESSIONS_CONFIG.items():
+        logger.info(f"  {sess_name}: VP={cfg['vp_start']}-{cfg['vp_end']} | Trade={cfg['trade_start']}-{cfg['trade_end']}")
     
     logger.info(f"Filters: Duration<{MAX_BREAKOUT_DURATION_MINUTES}min | POC>{MIN_POC_STRENGTH}x | Exclude:{EXCLUDED_VP_SHAPES}")
     logger.info(f"Risk: {RISK_PERCENT*100}% | MIN_RR: {MIN_RR} | TP1_RR: {TP1_RR}")
