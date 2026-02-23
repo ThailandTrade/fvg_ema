@@ -17,8 +17,8 @@ load_dotenv()
 # =============================================================================
 
 START_DATE_STR = "2025-01-01 00:00:00"
-INITIAL_CAPITAL = 50000.0
-RISK_PERCENT = 0.006
+INITIAL_CAPITAL = 1000
+RISK_PERCENT = 0.001
 
 TP_MODE = "POC"
 TARGET_RR = 3.0
@@ -27,16 +27,29 @@ MIN_RR = 2.0
 USE_TRAILING = True
 TP1_RR = 1.3
 
+# =============================================================================
+# SPLIT TP1 / TP2 (doit totaliser 1.0)
+# Ex: 0.6 = 60% de la position fermée à TP1, 40% restant court vers TP2
+# =============================================================================
+TP1_SPLIT = 0.5   # Part de la position fermée à TP1
+TP2_SPLIT = 0.5  # Part de la position restante pour TP2 (= 1 - TP1_SPLIT)
+
 FILTER_ENTRY_VS_POC = True
 USE_BREAKOUT_DURATION_FILTER = True
-MAX_BREAKOUT_DURATION_MINUTES = 4
+MAX_BREAKOUT_DURATION_MINUTES = 3
 USE_VP_STRUCTURE_FILTER = True
 MIN_POC_STRENGTH = 2.5
 USE_VP_SHAPE_FILTER = True
 #EXCLUDED_VP_SHAPES = ["P-SHAPE"]
 EXCLUDED_VP_SHAPES = [""]
-DISPLAY_MODE = "WEEKLY"  # Options: "NONE", "DAILY", "WEEKLY", "MONTHLY"
+DISPLAY_MODE = "MONTHLY"  # Options: "NONE", "DAILY", "WEEKLY", "MONTHLY"
 RESET_VP_PER_SESSION = True
+
+# =============================================================================
+# COOLDOWN APRÈS LOSS
+# =============================================================================
+USE_COOLDOWN_AFTER_LOSS = False
+COOLDOWN_AFTER_LOSS_MINUTES = 60   # Bloquer les entrées pendant X min après un LOSS (pas BE)
 
 # =============================================================================
 # AFFICHAGE DES DERNIERS TRADES
@@ -47,7 +60,7 @@ LAST_TRADES_COUNT = 10       # Nombre de trades à afficher
 # =============================================================================
 # AFFICHAGE DES TRADES EN COURS (NON CLOS)
 # =============================================================================
-SHOW_OPEN_TRADES = True      # Activer/désactiver l'affichage des trades ouverts
+SHOW_OPEN_TRADES = False      # Activer/désactiver l'affichage des trades ouverts
 
 # =============================================================================
 # CONFIGURATION DES HEURES DE SESSION (UTC)
@@ -56,8 +69,8 @@ SHOW_OPEN_TRADES = True      # Activer/désactiver l'affichage des trades ouvert
 # =============================================================================
 SESSIONS_CONFIG = {
     'TOKYO':  {'vp_start': 0,    'vp_end': 4,    'trade_start': 0,    'trade_end': 4},
-    'LONDON': {'vp_start': 8,    'vp_end': 13,   'trade_start': 9,    'trade_end': 13},   # VP dès 8h, trades dès 9h
-    'NY':     {'vp_start': 14.5, 'vp_end': 21,   'trade_start': 14.5, 'trade_end': 21},
+    'LONDON': {'vp_start': 8,    'vp_end': 14.5,   'trade_start': 9,    'trade_end': 14},
+    'NY':     {'vp_start': 14.5, 'vp_end': 21.5,   'trade_start': 15, 'trade_end': 21},
 }
 
 ASSETS = [
@@ -72,54 +85,20 @@ ASSETS = [
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
-    },
-    {
-        'enabled': False,
-        'symbol': 'BTCUSD',
-        'candle_table': 'candles_mt5_btcusd_1m',
-        'tick_table': 'market_ticks_btcusd',
-        'tick_size': 0.01,
-        'va_percent': 0.70,
-        'sl_offset': 1.00,  # Offset SL au-delà du swing extreme
-        'allow_long': True,
-        'allow_short': True,
-        'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
-    },
-    {
-        'enabled': False,
-        'symbol': 'US100.cash',
-        'candle_table': 'candles_mt5_us100_cash_1m',
-        'tick_table': 'market_ticks_us100',
-        'tick_size': 1.0,
-        'va_percent': 0.70,
-        'sl_offset': 2.0,
-        'allow_long': True,
-        'allow_short': True,
-        'sessions': {'TOKYO': False, 'LONDON': False, 'NY': True},
-    },
-    {
-        'enabled': False,
-        'symbol': 'XAUAUD',
-        'candle_table': 'candles_mt5_xauaud_1m',
-        'tick_table': 'market_ticks_xauaud',
-        'tick_size': 0.01,
-        'va_percent': 0.70,
-        'sl_offset': 0.50,
-        'allow_long': True,
-        'allow_short': True,
-        'sessions': {'TOKYO': False, 'LONDON': False, 'NY': True},
+        'allowed_days': [0, 1, 3, 4],  # 0=Lundi, 1=Mardi, 2=Mercredi, 3=Jeudi, 4=Vendredi
     },
     {
         'enabled': False,
         'symbol': 'XAGUSD',
-        'candle_table': 'candles_mt5_xauaud_1m',
-        'tick_table': 'market_ticks_xauaud',
+        'candle_table': 'candles_mt5_xagusd_1m',
+        'tick_table': 'market_ticks_xagusd',
         'tick_size': 0.01,
         'va_percent': 0.70,
         'sl_offset': 0.50,
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
+        'allowed_days': [1, 3],  # Mardi + Jeudi uniquement
     },
 ]
 
@@ -376,6 +355,9 @@ def display_last_trades(df_trades, count):
     print(f"DÉTAIL DES {len(last_trades)} DERNIERS TRADES")
     print(f"{'=' * 120}")
     
+    tp1_pct = int(TP1_SPLIT * 100)
+    tp2_pct = int(TP2_SPLIT * 100)
+    
     for idx, trade in last_trades.iterrows():
         scenario_code, scenario_label, emoji = get_exit_scenario(trade)
         
@@ -446,21 +428,22 @@ def display_last_trades(df_trades, count):
         print(f"\n  RÉSULTAT:")
         print(f"    R:R Potentiel: {trade['rr']:.2f}")
         print(f"    Risk (pts): {risk_pts:.2f}")
+        print(f"    Split: {tp1_pct}/{tp2_pct}")
         
         if scenario_code == "TP1_TP2":
-            pnl_tp1 = TP1_RR * 0.5
-            pnl_tp2 = trade['rr'] * 0.5
-            print(f"    PnL TP1 (50%): +{pnl_tp1:.2f}R")
-            print(f"    PnL TP2 (50%): +{pnl_tp2:.2f}R")
+            pnl_tp1 = TP1_RR * TP1_SPLIT
+            pnl_tp2 = trade['rr'] * TP2_SPLIT
+            print(f"    PnL TP1 ({tp1_pct}%): +{pnl_tp1:.2f}R")
+            print(f"    PnL TP2 ({tp2_pct}%): +{pnl_tp2:.2f}R")
             print(f"    PnL Total: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
         elif scenario_code == "TP1_BE":
-            pnl_tp1 = TP1_RR * 0.5
-            print(f"    PnL TP1 (50%): +{pnl_tp1:.2f}R")
-            print(f"    PnL TP2 (50%): 0.00R (BE)")
+            pnl_tp1 = TP1_RR * TP1_SPLIT
+            print(f"    PnL TP1 ({tp1_pct}%): +{pnl_tp1:.2f}R")
+            print(f"    PnL TP2 ({tp2_pct}%): 0.00R (BE)")
             print(f"    PnL Total: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
         elif scenario_code == "SL_DIRECT":
-            print(f"    PnL TP1 (50%): -0.50R")
-            print(f"    PnL TP2 (50%): -0.50R")
+            print(f"    PnL TP1 ({tp1_pct}%): -{TP1_SPLIT:.2f}R")
+            print(f"    PnL TP2 ({tp2_pct}%): -{TP2_SPLIT:.2f}R")
             print(f"    PnL Total: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
         else:
             print(f"    PnL: {trade['pnl_r']:+.2f}R (${trade['pnl']:+.2f})")
@@ -483,6 +466,9 @@ def display_open_trades(assets_data, current_capital):
         print("TRADES EN COURS: Aucun")
         print(f"{'=' * 80}")
         return
+    
+    tp1_pct = int(TP1_SPLIT * 100)
+    tp2_pct = int(TP2_SPLIT * 100)
     
     print(f"\n{'=' * 120}")
     print(f"TRADES EN COURS ({len(open_trades)} positions ouvertes)")
@@ -527,19 +513,21 @@ def display_open_trades(assets_data, current_capital):
         print(f"    VAH: {trade.get('vah_at_entry', 0):.2f} | POC: {trade.get('poc_at_entry', 0):.2f} | VAL: {trade.get('val_at_entry', 0):.2f}")
         print(f"    POC Strength: {trade.get('poc_strength', 0):.2f}x | Shape: {trade.get('vp_shape', 'N/A')}")
         
-        print(f"\n  POTENTIEL:")
+        print(f"\n  POTENTIEL (split {tp1_pct}/{tp2_pct}):")
         print(f"    R:R Potentiel: {rr:.2f}")
         risk_amount = current_capital * RISK_PERCENT
         
         if partial_closed:
-            locked_pnl = TP1_RR * 0.5
-            remaining_potential = rr * 0.5
+            locked_pnl = TP1_RR * TP1_SPLIT
+            remaining_potential = rr * TP2_SPLIT
             print(f"    PnL verrouillé (TP1): +{locked_pnl:.2f}R")
             print(f"    Potentiel restant (TP2): +{remaining_potential:.2f}R")
             print(f"    Risque restant: 0R (SL @ BE)")
         else:
-            print(f"    Si TP1+TP2: +{(TP1_RR * 0.5 + rr * 0.5):.2f}R (${risk_amount * (TP1_RR * 0.5 + rr * 0.5):+.2f})")
-            print(f"    Si TP1+BE:  +{TP1_RR * 0.5:.2f}R (${risk_amount * TP1_RR * 0.5:+.2f})")
+            full_win = TP1_RR * TP1_SPLIT + rr * TP2_SPLIT
+            tp1_be = TP1_RR * TP1_SPLIT
+            print(f"    Si TP1+TP2: +{full_win:.2f}R (${risk_amount * full_win:+.2f})")
+            print(f"    Si TP1+BE:  +{tp1_be:.2f}R (${risk_amount * tp1_be:+.2f})")
             print(f"    Si SL:      -1.00R (${-risk_amount:.2f})")
 
 
@@ -567,7 +555,9 @@ def run_backtest():
                 'vp': IncrementalVolumeProfile(tick_size=asset['tick_size'], va_percent=asset['va_percent']),
                 'state': "INSIDE", 'swing_extreme': 0.0, 'active_trade': None,
                 'breakout_time': None, 'breakout_price': None, 'current_session': None,
-                'session_start_dt': None,  # Nouveau: début exact de la session courante
+                'session_start_dt': None,
+                'last_loss_time': None,  # Cooldown: timestamp du dernier LOSS
+                'last_loss_direction': None,  # Cooldown: direction du dernier LOSS
             }
             print(f"   + {asset['symbol']}: {len(df_candles):,} candles | {len(df_ticks):,} ticks")
     conn.close()
@@ -591,6 +581,7 @@ def run_backtest():
     filtered_by_duration = 0
     filtered_by_poc_strength = 0
     filtered_by_vp_shape = 0
+    filtered_by_cooldown = 0
     total_potential_entries = 0
     
     # Tracking journalier
@@ -599,7 +590,7 @@ def run_backtest():
     day_trades = 0
     day_wins = 0
     day_pnl_r = 0.0
-    day_pnl_pct = 0.0  # AJOUT
+    day_pnl_pct = 0.0
     day_high_water = INITIAL_CAPITAL
     day_max_dd = 0.0
     
@@ -609,7 +600,7 @@ def run_backtest():
     week_trades = 0
     week_wins = 0
     week_pnl_r = 0.0
-    week_pnl_pct = 0.0  # AJOUT
+    week_pnl_pct = 0.0
     week_high_water = INITIAL_CAPITAL
     week_max_dd = 0.0
     
@@ -619,7 +610,7 @@ def run_backtest():
     month_trades = 0
     month_wins = 0
     month_pnl_r = 0.0
-    month_pnl_pct = 0.0  # AJOUT
+    month_pnl_pct = 0.0
     month_high_water = INITIAL_CAPITAL
     month_max_dd = 0.0
     
@@ -640,11 +631,19 @@ def run_backtest():
     vp_shape_status = f"ON (exclu: {EXCLUDED_VP_SHAPES})" if USE_VP_SHAPE_FILTER else "OFF"
     vp_reset_status = "PAR SESSION" if RESET_VP_PER_SESSION else "JOURNALIER (23h-0h)"
     
+    tp1_pct = int(TP1_SPLIT * 100)
+    tp2_pct = int(TP2_SPLIT * 100)
+    
     print(f"\n[BACKTEST] VP Failed Breakout | MULTI-ASSETS: {symbols_list}")
     print(f"[CAPITAL] ${INITIAL_CAPITAL:,.2f} | Risque: {RISK_PERCENT*100}% | TP: {tp_mode_display} | Trailing: {trailing_status}")
+    print(f"[SPLIT]   TP1/TP2: {tp1_pct}/{tp2_pct} | TP1 BE PnL: +{TP1_RR * TP1_SPLIT:.2f}R | Full Loss: -1.00R")
     print(f"[CONFIG]  Directions: {directions} | POC Filter: {poc_filter_status}")
     for sym, sess_list in active_sessions_display.items():
-        print(f"[CONFIG]  {sym}: Sessions = {sess_list}")
+        asset_cfg = next(a for a in enabled_assets if a['symbol'] == sym)
+        day_names_short = {0: 'Lun', 1: 'Mar', 2: 'Mer', 3: 'Jeu', 4: 'Ven', 5: 'Sam', 6: 'Dim'}
+        allowed = asset_cfg.get('allowed_days', [0, 1, 2, 3, 4])
+        days_str = ', '.join(day_names_short[d] for d in allowed)
+        print(f"[CONFIG]  {sym}: Sessions = {sess_list} | Jours = [{days_str}]")
     print(f"[SESSIONS] Heures VP / Heures Trade:")
     for sess_name, cfg in SESSIONS_CONFIG.items():
         vp_h = f"{cfg['vp_start']}-{cfg['vp_end']}"
@@ -654,6 +653,8 @@ def run_backtest():
     print(f"[FILTER]  VP Structure (POC Strength): {vp_structure_status}")
     print(f"[FILTER]  VP Shape: {vp_shape_status}")
     print(f"[RESET]   VP Reset: {vp_reset_status}")
+    cooldown_status = f"ON ({COOLDOWN_AFTER_LOSS_MINUTES}min)" if USE_COOLDOWN_AFTER_LOSS else "OFF"
+    print(f"[COOLDOWN] After Loss: {cooldown_status}")
     
     if DISPLAY_MODE != "NONE":
         print("=" * 140)
@@ -682,7 +683,6 @@ def run_backtest():
             if DISPLAY_MODE == "DAILY" and day_trades > 0:
                 day_wr = (day_wins / day_trades * 100) if day_trades > 0 else 0
                 day_max_dd_pct = (day_max_dd / day_high_water * 100) if day_high_water > 0 else 0
-                # Calcul du PnL en %
                 day_pnl_pct = ((current_capital - day_start_capital) / day_start_capital * 100) if day_start_capital > 0 else 0
                 print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades - day_wins:>4} | {day_wr:>5.1f}% | {day_pnl_r:>+7.1f}R | {day_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {day_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             day_start_capital = current_capital
@@ -698,7 +698,6 @@ def run_backtest():
             if DISPLAY_MODE == "WEEKLY" and week_trades > 0:
                 week_wr = (week_wins / week_trades * 100) if week_trades > 0 else 0
                 week_max_dd_pct = (week_max_dd / week_high_water * 100) if week_high_water > 0 else 0
-                # Calcul du PnL en %
                 week_pnl_pct = ((current_capital - week_start_capital) / week_start_capital * 100) if week_start_capital > 0 else 0
                 print(f"{current_week:<12} | {week_trades:>6} | {week_wins:>4} | {week_trades - week_wins:>4} | {week_wr:>5.1f}% | {week_pnl_r:>+7.1f}R | {week_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {week_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             week_start_capital = current_capital
@@ -714,7 +713,6 @@ def run_backtest():
             if DISPLAY_MODE == "MONTHLY" and month_trades > 0:
                 month_wr = (month_wins / month_trades * 100) if month_trades > 0 else 0
                 month_max_dd_pct = (month_max_dd / month_high_water * 100) if month_high_water > 0 else 0
-                # Calcul du PnL en %
                 month_pnl_pct = ((current_capital - month_start_capital) / month_start_capital * 100) if month_start_capital > 0 else 0
                 print(f"{current_month:<10} | {month_trades:>6} | {month_wins:>4} | {month_trades - month_wins:>4} | {month_wr:>5.1f}% | {month_pnl_r:>+7.1f}R | {month_pnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {month_max_dd_pct:>7.2f}% | {max_dd_percent:>7.2f}%")
             month_start_capital = current_capital
@@ -732,7 +730,6 @@ def run_backtest():
         # =================================================================
         # ÉTAPE 1: SESSION DETECTION & VP UPDATE
         # TOUJOURS exécuté, même avec un trade actif
-        # (aligné sur le live qui reconstruit le VP à chaque bougie)
         # =================================================================
         curr_sess = get_session(row.dt)
         asset_sessions = config.get('sessions', {})
@@ -781,7 +778,7 @@ def run_backtest():
                         if row.low <= tp1_price:
                             active_trade['partial_closed'] = True
                             active_trade['sl'] = active_trade['entry']
-                            active_trade['partial_pnl_r'] = TP1_RR * 0.5
+                            active_trade['partial_pnl_r'] = TP1_RR * TP1_SPLIT
                             active_trade['tp1_time'] = row.dt
                     if row.low <= active_trade['tp']:
                         res = "WIN"
@@ -799,7 +796,7 @@ def run_backtest():
                         if row.high >= tp1_price:
                             active_trade['partial_closed'] = True
                             active_trade['sl'] = active_trade['entry']
-                            active_trade['partial_pnl_r'] = TP1_RR * 0.5
+                            active_trade['partial_pnl_r'] = TP1_RR * TP1_SPLIT
                             active_trade['tp1_time'] = row.dt
                     if row.high >= active_trade['tp']:
                         res = "WIN"
@@ -813,7 +810,7 @@ def run_backtest():
                 partial_pnl_r = active_trade.get('partial_pnl_r', 0)
                 if res == "WIN":
                     if USE_TRAILING and TP_MODE == "POC" and active_trade.get('partial_closed', False):
-                        pnl_r = partial_pnl_r + (trade_rr * 0.5)
+                        pnl_r = partial_pnl_r + (trade_rr * TP2_SPLIT)
                     else:
                         pnl_r = trade_rr
                     pnl = risk_amount * pnl_r
@@ -828,6 +825,10 @@ def run_backtest():
                     else:
                         pnl = -risk_amount
                         pnl_r = -1.0
+                        # Cooldown: enregistrer le timestamp et la direction du loss
+                        if USE_COOLDOWN_AFTER_LOSS:
+                            asset_data['last_loss_time'] = row.dt
+                            asset_data['last_loss_direction'] = active_trade['type']
                 current_capital += pnl
                 
                 day_trades += 1
@@ -941,14 +942,26 @@ def run_backtest():
                     if vp_shape in EXCLUDED_VP_SHAPES:
                         vp_shape_ok = False
                         filtered_by_vp_shape += 1
-                if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_short'] and can_trade_now(row.dt, curr_sess):
+                # Cooldown check (même direction uniquement)
+                cooldown_ok = True
+                if USE_COOLDOWN_AFTER_LOSS and asset_data['last_loss_time'] is not None:
+                    if asset_data['last_loss_direction'] == 'SHORT':  # Même direction
+                        minutes_since_loss = (row.dt - asset_data['last_loss_time']).total_seconds() / 60.0
+                        if minutes_since_loss < COOLDOWN_AFTER_LOSS_MINUTES:
+                            cooldown_ok = False
+                            filtered_by_cooldown += 1
+                if duration_ok and poc_strength_ok and vp_shape_ok and cooldown_ok and config['allow_short'] and can_trade_now(row.dt, curr_sess):
+                    # Filtre jour de la semaine
+                    if row.dt.weekday() not in config.get('allowed_days', [0, 1, 2, 3, 4]):
+                        asset_data['state'] = "INSIDE"
+                        continue
                     sl_offset = config.get('sl_offset', 0.10)
                     sl = asset_data['swing_extreme'] + sl_offset
                     risk = sl - close
                     if TP_MODE == "POC":
                         tp = poc
                         actual_rr = (close - tp) / risk if risk > 0 else 0
-                        if actual_rr > 15:
+                        if actual_rr > 30:
                             asset_data['state'] = "INSIDE"
                             continue
                     else:
@@ -989,14 +1002,26 @@ def run_backtest():
                     if vp_shape in EXCLUDED_VP_SHAPES:
                         vp_shape_ok = False
                         filtered_by_vp_shape += 1
-                if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_long'] and can_trade_now(row.dt, curr_sess):
+                # Cooldown check (même direction uniquement)
+                cooldown_ok = True
+                if USE_COOLDOWN_AFTER_LOSS and asset_data['last_loss_time'] is not None:
+                    if asset_data['last_loss_direction'] == 'LONG':  # Même direction
+                        minutes_since_loss = (row.dt - asset_data['last_loss_time']).total_seconds() / 60.0
+                        if minutes_since_loss < COOLDOWN_AFTER_LOSS_MINUTES:
+                            cooldown_ok = False
+                            filtered_by_cooldown += 1
+                if duration_ok and poc_strength_ok and vp_shape_ok and cooldown_ok and config['allow_long'] and can_trade_now(row.dt, curr_sess):
+                    # Filtre jour de la semaine
+                    if row.dt.weekday() not in config.get('allowed_days', [0, 1, 2, 3, 4]):
+                        asset_data['state'] = "INSIDE"
+                        continue
                     sl_offset = config.get('sl_offset', 0.10)
                     sl = asset_data['swing_extreme'] - sl_offset
                     risk = close - sl
                     if TP_MODE == "POC":
                         tp = poc
                         actual_rr = (tp - close) / risk if risk > 0 else 0
-                        if actual_rr > 15:
+                        if actual_rr > 30:
                             asset_data['state'] = "INSIDE"
                             continue
                     else:
@@ -1081,6 +1106,7 @@ def run_backtest():
     print(f"  Gain Total:           {total_pnl_r:>+14.1f} R")
     print(f"  Max Drawdown:         {max_dd_percent:>13.2f}%")
     print(f"  Recovery Factor:      {recovery_factor:>14.2f}")
+    print(f"  Split TP1/TP2:        {tp1_pct}/{tp2_pct}")
     
     print(f"\n{'─' * 60}")
     print("STATISTIQUES DE TRADING")
@@ -1099,6 +1125,24 @@ def run_backtest():
     print(f"  Avg R:R (winners):    {avg_rr_winners:>14.2f}")
     print(f"  Avg R:R (all trades): {avg_rr_all:>14.2f}")
     
+    # Détail par scénario de sortie
+    print(f"\n{'─' * 60}")
+    print("PERFORMANCE PAR SCÉNARIO DE SORTIE")
+    print(f"{'─' * 60}")
+    tp1_tp2_count = len(df_trades[(df_trades['result'] == 'WIN') & (df_trades['tp1_time'].notna())])
+    tp2_direct_count = len(df_trades[(df_trades['result'] == 'WIN') & (df_trades['tp1_time'].isna())])
+    be_count = be_trades
+    sl_direct_count = len(df_trades[(df_trades['result'] == 'LOSS') & (df_trades['tp1_time'].isna())])
+    tp1_sl_count = len(df_trades[(df_trades['result'] == 'LOSS') & (df_trades['tp1_time'].notna())])
+    
+    print(f"  TP1 → TP2 (full win):  {tp1_tp2_count:>5} trades | PnL/trade: +{TP1_RR * TP1_SPLIT:.2f}R + RR×{TP2_SPLIT}")
+    print(f"  TP1 → BE:              {be_count:>5} trades | PnL/trade: +{TP1_RR * TP1_SPLIT:.2f}R")
+    print(f"  SL direct:             {sl_direct_count:>5} trades | PnL/trade: -1.00R")
+    if tp2_direct_count > 0:
+        print(f"  TP2 direct (no TP1):   {tp2_direct_count:>5} trades")
+    if tp1_sl_count > 0:
+        print(f"  TP1 → SL (anormal):    {tp1_sl_count:>5} trades")
+    
     print(f"\n{'─' * 60}")
     print("FILTRES APPLIQUES")
     print(f"{'─' * 60}")
@@ -1106,6 +1150,8 @@ def run_backtest():
     print(f"  Filtres (duree):      {filtered_by_duration:>14} ({filtered_by_duration/total_potential_entries*100 if total_potential_entries > 0 else 0:.1f}%)")
     print(f"  Filtres (POC faible): {filtered_by_poc_strength:>14} ({filtered_by_poc_strength/total_potential_entries*100 if total_potential_entries > 0 else 0:.1f}%)")
     print(f"  Filtres (VP Shape):   {filtered_by_vp_shape:>14} ({filtered_by_vp_shape/total_potential_entries*100 if total_potential_entries > 0 else 0:.1f}%)")
+    if USE_COOLDOWN_AFTER_LOSS:
+        print(f"  Filtres (Cooldown):   {filtered_by_cooldown:>14} ({filtered_by_cooldown/total_potential_entries*100 if total_potential_entries > 0 else 0:.1f}%)")
     
     if 'poc_strength' in df_trades.columns:
         print(f"\n{'─' * 60}")
@@ -1249,6 +1295,29 @@ def run_backtest():
         t_pf = t_gross_profit / t_gross_loss if t_gross_loss > 0 else float('inf')
         pf_str = f"{t_pf:.2f}" if t_pf != float('inf') else "inf"
         print(f"  {trade_type:<8} | {t_total:>7} trades | {t_wins:>5} W | {t_losses:>5} L | {t_wr:>5.1f}% | {t_pnl_r:>+8.1f}R | PF {pf_str}")
+    
+    print(f"\n{'─' * 60}")
+    print("BREAKDOWN PAR JOUR DE LA SEMAINE")
+    print(f"{'─' * 60}")
+    print(f"{'JOUR':<12} | {'TRADES':>7} | {'WIN':>5} | {'LOSS':>5} | {'WR%':>7} | {'PnL R':>9} | {'Avg':>7} | {'PF':>6}")
+    print("-" * 75)
+    day_names = {0: 'Lundi', 1: 'Mardi', 2: 'Mercredi', 3: 'Jeudi', 4: 'Vendredi', 5: 'Samedi', 6: 'Dimanche'}
+    df_trades['day_of_week'] = df_trades['date'].dt.dayofweek
+    for dow in range(7):
+        dow_trades = df_trades[df_trades['day_of_week'] == dow]
+        if len(dow_trades) == 0:
+            continue
+        d_total = len(dow_trades)
+        d_wins = len(dow_trades[dow_trades['result'].isin(['WIN', 'BE'])])
+        d_losses = len(dow_trades[dow_trades['result'] == 'LOSS'])
+        d_wr = d_wins / d_total * 100
+        d_pnl_r = dow_trades['pnl_r'].sum()
+        d_avg = dow_trades['pnl_r'].mean()
+        d_gp = dow_trades[dow_trades['pnl'] > 0]['pnl'].sum()
+        d_gl = abs(dow_trades[dow_trades['pnl'] < 0]['pnl'].sum())
+        d_pf = d_gp / d_gl if d_gl > 0 else float('inf')
+        pf_str = f"{d_pf:.2f}" if d_pf != float('inf') else "inf"
+        print(f"{day_names[dow]:<12} | {d_total:>7} | {d_wins:>5} | {d_losses:>5} | {d_wr:>6.1f}% | {d_pnl_r:>+8.1f}R | {d_avg:>+6.2f}R | {pf_str:>6}")
     
     # Affichage des trades en cours si activé
     if SHOW_OPEN_TRADES:

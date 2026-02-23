@@ -38,9 +38,9 @@ TP1_RR = 1.3      # R:R ou on ferme 50% et met BE
 # Filtres globaux
 FILTER_ENTRY_VS_POC = True
 USE_BREAKOUT_DURATION_FILTER = True
-MAX_BREAKOUT_DURATION_MINUTES = 3
+MAX_BREAKOUT_DURATION_MINUTES = 4
 USE_VP_STRUCTURE_FILTER = True
-MIN_POC_STRENGTH = 3.0
+MIN_POC_STRENGTH = 2.5
 USE_VP_SHAPE_FILTER = True
 EXCLUDED_VP_SHAPES = [""]
 
@@ -68,6 +68,18 @@ ASSETS = [
         'mt5_symbol': 'XAUUSD',
         'candle_table': 'candles_mt5_xauusd_1m',
         'tick_table': 'market_ticks_xauusd',
+        'tick_size': 0.01,
+        'va_percent': 0.70,
+        'allow_long': True,
+        'allow_short': True,
+        'sl_offset': 0.50,
+        'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
+    },{
+        'enabled': False,
+        'symbol': 'XAGUSD',
+        'mt5_symbol': 'XAGUSD',
+        'candle_table': 'candles_mt5_xagusd_1m',
+        'tick_table': 'market_ticks_xagusd',
         'tick_size': 0.01,
         'va_percent': 0.70,
         'allow_long': True,

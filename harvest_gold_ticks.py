@@ -12,10 +12,10 @@ load_dotenv()
 # Symboles à surveiller : {symbole_mt5: nom_table_postgres}
 SYMBOLS = {
     "XAUUSD": "market_ticks_xauusd",
-    "BTCUSD": "market_ticks_btcusd",
+    "XAGUSD": "market_ticks_xagusd",
 }
 
-DEFAULT_DAYS_BACK = 365  # Nombre de jours à récupérer si DB vide
+DEFAULT_DAYS_BACK = 1000  # Nombre de jours à récupérer si DB vide
 CHUNK_SIZE_HOURS = 24    # Taille des morceaux pour le téléchargement historique
 SLEEP_INTERVAL = 1       # Pause en mode Live
 UTC = timezone.utc
