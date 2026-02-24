@@ -28,6 +28,8 @@ load_dotenv()
 ENABLE_MR = True          # Mean Reversion after reintegration
 ENABLE_CB = True          # Confirmed Breakout after sustained breakout
 
+PAPER_TRADING = True   # Paper mode: log signals, NO real orders
+
 RISK_PERCENT = 0.001  # 0.1% par trade
 WAIT_CANDLES = 3      # Candles to wait after breakout before deciding MR or CB
 
@@ -491,6 +493,8 @@ def get_lot_size(symbol: str, entry: float, sl: float, risk_amount: float) -> fl
 
 
 def has_position_or_order(symbol: str) -> bool:
+    if PAPER_TRADING:
+        return False  # No real positions in paper mode
     positions = mt5.positions_get(symbol=symbol)
     if positions and len(positions) > 0:
         return True
@@ -501,6 +505,8 @@ def has_position_or_order(symbol: str) -> bool:
 
 
 def manage_tp1_to_be(symbol: str, tick_size: float):
+    if PAPER_TRADING:
+        return  # Nothing to manage in paper mode
     positions = mt5.positions_get(symbol=symbol)
     if not positions:
         return
@@ -560,6 +566,10 @@ def place_market_order(symbol: str, order_type: str, entry: float, sl: float, tp
     logger.info(f"[{symbol}] TP1: {tp1} | TP2: {tp2}")
     logger.info(f"[{symbol}] Risk: ${risk_amount:.2f} | Split: {tp1_split:.0%}/{tp2_split:.0%} | Lot1: {lot1} | Lot2: {lot2}")
 
+    if PAPER_TRADING:
+        logger.info(f"[{symbol}] [PAPER] Order logged but NOT sent to MT5")
+        return True  # Simulate success so state machine proceeds normally
+
     success_count = 0
 
     request1 = {
@@ -609,6 +619,8 @@ def place_market_order(symbol: str, order_type: str, entry: float, sl: float, tp
 
 
 def daily_market_close_guard(candle_dt: datetime) -> bool:
+    if PAPER_TRADING:
+        return False  # Don't close anything in paper mode
     if candle_dt.weekday() == 4 and candle_dt.hour == 21 and candle_dt.minute >= 50:
         logger.warning("Friday market close - closing all")
         positions = mt5.positions_get()
@@ -1280,8 +1292,9 @@ def warmup_structural_levels(asset_states: dict, engine):
 
 
 def main():
+    mode = "PAPER TRADING" if PAPER_TRADING else "LIVE"
     logger.info("=" * 60)
-    logger.info("Combined MR + CB - Live Trading")
+    logger.info(f"Combined MR + CB - {mode}")
     logger.info("ALIGNED ON backtest_combined_mr_breakout")
     logger.info(f"MR={'ON' if ENABLE_MR else 'OFF'} | CB={'ON' if ENABLE_CB else 'OFF'} | WAIT_CANDLES={WAIT_CANDLES}")
     logger.info("=" * 60)
