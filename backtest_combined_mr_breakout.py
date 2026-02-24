@@ -23,7 +23,7 @@ ENABLE_CB = True          # Confirmed Breakout after sustained breakout
 # =============================================================================
 START_DATE_STR = "2025-01-01 00:00:00"
 INITIAL_CAPITAL = 1000
-RISK_PERCENT = 0.01
+RISK_PERCENT = 0.001
 
 WAIT_CANDLES = 3          # Candles to wait after breakout before deciding MR or CB
 
@@ -41,17 +41,17 @@ SHOW_OPEN_TRADES = False
 # MR-SPECIFIC CONFIG (Mean Reversion)
 # =============================================================================
 MR_TP_MODE = "POC"            # TP target for MR (POC of session VP)
-MR_MIN_RR = 2.0
-MR_SL_OFFSET = 0.50
+MR_MIN_RR = 2.5
+MR_SL_OFFSET = 1.0
 MR_TP1_RR = 1.3
 MR_TP1_SPLIT = 0.5
 MR_TP2_SPLIT = 0.5
 MR_USE_TRAILING = True
 MR_USE_VP_STRUCTURE_FILTER = True
-MR_MIN_POC_STRENGTH = 2.5
+MR_MIN_POC_STRENGTH = 2.0
 MR_FILTER_ENTRY_VS_POC = True
 MR_USE_BREAKOUT_DURATION_FILTER = True
-MR_MAX_BREAKOUT_DURATION_MINUTES = 4  # Max minutes in breakout before reintegration
+MR_MAX_BREAKOUT_DURATION_MINUTES = 3  # Max minutes in breakout before reintegration
 MR_EXCLUDED_HOURS = []
 
 # =============================================================================
@@ -96,7 +96,7 @@ ASSETS = [
         'allow_long': True,
         'allow_short': True,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': False},
-        'allowed_days': [0, 1, 2, 3],
+        'allowed_days': [0, 1, 2, 3, 4],
     },
 ]
 
