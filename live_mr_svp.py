@@ -1261,8 +1261,6 @@ def warmup_structural_levels(asset_states: dict, engine):
         logger.info(f"[{symbol}] Loading prev_week ticks: {week_start.strftime('%Y-%m-%d')} to {week_end.strftime('%Y-%m-%d')}")
         prices, volumes = fetch_ticks_from_db(engine, tick_table, week_start, week_end)
         if len(prices) > 0:
-            # Feed day by day to trigger day boundaries
-            tick_df = pd.DataFrame({'price': prices, 'volume': volumes})
             # Use a single update with a representative date from last week
             mid_week = week_start + timedelta(days=2)
             asset_state.structural.update(mid_week, prices, volumes)
@@ -1285,10 +1283,10 @@ def warmup_structural_levels(asset_states: dict, engine):
         if len(prices) > 0:
             asset_state.structural.update(now, prices, volumes)
 
-        pd = asset_state.structural.prev_day
-        pw = asset_state.structural.prev_week
-        logger.info(f"[{symbol}] Structural prev_day: POC={pd['poc']} VAH={pd['vah']} VAL={pd['val']}")
-        logger.info(f"[{symbol}] Structural prev_week: POC={pw['poc']} VAH={pw['vah']} VAL={pw['val']}")
+        prev_d = asset_state.structural.prev_day
+        prev_w = asset_state.structural.prev_week
+        logger.info(f"[{symbol}] Structural prev_day: POC={prev_d['poc']} VAH={prev_d['vah']} VAL={prev_d['val']}")
+        logger.info(f"[{symbol}] Structural prev_week: POC={prev_w['poc']} VAH={prev_w['vah']} VAL={prev_w['val']}")
 
 
 def main():
