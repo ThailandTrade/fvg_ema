@@ -780,7 +780,49 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
     asset_state.last_candle_ts = candle_ts
 
     # ======================================================================
-    # GHOST TRADE MANAGEMENT
+    # STEP 1: STRUCTURAL LEVELS — feed from ALL candles (no session filter)
+    # Matches backtest: structural.update() runs BEFORE session check
+    # ======================================================================
+    tick_start = candle_dt
+    tick_end = candle_dt + timedelta(minutes=1)
+    tick_prices, tick_volumes = fetch_ticks_from_db(engine, config['tick_table'], tick_start, tick_end)
+    asset_state.structural.update(candle_dt, tick_prices, tick_volumes)
+
+    # ======================================================================
+    # STEP 2: SESSION VP (only during active sessions)
+    # ======================================================================
+    curr_sess = get_session(candle_dt)
+    result['session'] = curr_sess
+    asset_sessions = config.get('sessions', {})
+
+    # Reset VP au debut de session
+    if RESET_VP_PER_SESSION:
+        session_start = is_session_start(candle_dt)
+        if session_start and asset_sessions.get(session_start, False):
+            asset_state.reset_vp()
+            asset_state.current_session = session_start
+            result['event'] = "SESSION_START"
+            result['event_details'] = session_start
+
+    if asset_sessions.get(curr_sess, False):
+        # Construire VP depuis debut de session jusqu'à FIN de la bougie actuelle
+        session_cfg = SESSIONS_CONFIG.get(curr_sess, {})
+        session_start_hour = session_cfg.get('vp_start', 0)
+        session_start_dt = candle_dt.replace(hour=int(session_start_hour), minute=int((session_start_hour % 1) * 60), second=0, microsecond=0)
+        if session_start_dt > candle_dt:
+            session_start_dt -= timedelta(days=1)
+
+        end_dt = candle_dt + timedelta(minutes=1)
+
+        prices, volumes = fetch_ticks_from_db(engine, config['tick_table'], session_start_dt, end_dt)
+
+        if len(prices) > 0:
+            asset_state.vp.reset()
+            asset_state.vp.add_ticks(prices, volumes)
+
+    # ======================================================================
+    # STEP 3a: GHOST TRADE MANAGEMENT (PD POC blocking)
+    # Matches backtest: ghost check is AFTER VP build + structural feed
     # ======================================================================
     ghost = asset_state.ghost_trade
     if ghost:
@@ -816,12 +858,7 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
             result['state_after'] = asset_state.state
             return result
 
-    # Déterminer la session
-    curr_sess = get_session(candle_dt)
-    result['session'] = curr_sess
-    asset_sessions = config.get('sessions', {})
-
-    # Hors session -> INSIDE
+    # Hors session -> INSIDE (after structural + VP + ghost, matching backtest order)
     if not asset_sessions.get(curr_sess, False):
         asset_state.state = "INSIDE"
         asset_state.breakout_direction = None
@@ -830,40 +867,9 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
         result['event'] = "OUT_OF_SESSION"
         return result
 
-    # Reset VP au debut de session
-    if RESET_VP_PER_SESSION:
-        session_start = is_session_start(candle_dt)
-        if session_start and asset_sessions.get(session_start, False):
-            asset_state.reset_vp()
-            asset_state.current_session = session_start
-            result['event'] = "SESSION_START"
-            result['event_details'] = session_start
-
-    # Construire VP depuis debut de session jusqu'à FIN de la bougie actuelle
-    session_cfg = SESSIONS_CONFIG.get(curr_sess, {})
-    session_start_hour = session_cfg.get('vp_start', 0)
-    session_start_dt = candle_dt.replace(hour=int(session_start_hour), minute=int((session_start_hour % 1) * 60), second=0, microsecond=0)
-    if session_start_dt > candle_dt:
-        session_start_dt -= timedelta(days=1)
-
-    end_dt = candle_dt + timedelta(minutes=1)
-
-    prices, volumes = fetch_ticks_from_db(engine, config['tick_table'], session_start_dt, end_dt)
-
-    if len(prices) > 0:
-        asset_state.vp.reset()
-        asset_state.vp.add_ticks(prices, volumes)
-
-    # Update structural levels tracker with ticks for current minute
-    tick_start = candle_dt
-    tick_end = candle_dt + timedelta(minutes=1)
-    tick_prices, tick_volumes = fetch_ticks_from_db(engine, config['tick_table'], tick_start, tick_end)
-    asset_state.structural.update(candle_dt, tick_prices, tick_volumes)
-
     poc, vah, val = asset_state.vp.get_levels()
     if poc is None:
         result['event'] = "NO_VP"
-        result['event_details'] = f"0 ticks from {session_start_dt.strftime('%H:%M')} to {end_dt.strftime('%H:%M')}"
         result['state_after'] = asset_state.state
         return result
 
@@ -1086,12 +1092,11 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
                         }
                         logger.info(f"[{symbol}] Ghost trade started: {direction} entry={close:.2f} sl={sl:.2f} tp={tp:.2f} (PD_POC)")
                         result['event'] = "CB_GHOST_TRADE"
-                        result['event_details'] = f"{direction} → PD_POC={tp:.2f}"
+                        result['event_details'] = f"{direction} -> PD_POC={tp:.2f}"
+                        # Reset state (matching backtest: no wait_highs/wait_lows reset here)
                         asset_state.state = "INSIDE"
                         asset_state.breakout_direction = None
                         asset_state.candles_since_breakout = 0
-                        asset_state.wait_highs = []
-                        asset_state.wait_lows = []
                         result['state_after'] = asset_state.state
                         return result
 
