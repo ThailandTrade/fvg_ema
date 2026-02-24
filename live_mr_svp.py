@@ -747,12 +747,6 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
         'has_position': False,
     }
 
-    # Check position existante
-    if has_position_or_order(mt5_symbol):
-        result['has_position'] = True
-        result['event'] = "POSITION_ACTIVE"
-        return result
-
     # Charger les candles
     candles = fetch_candles_from_db(engine, config['candle_table'], limit=5)
     if not candles:
@@ -857,6 +851,17 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
             result['event_details'] = f"{ghost['type']} entry={ghost['entry']:.2f} sl={ghost['sl']:.2f} tp={ghost['tp']:.2f}"
             result['state_after'] = asset_state.state
             return result
+
+    # ======================================================================
+    # STEP 3b: ACTIVE POSITION CHECK (after structural + VP + ghost feeds)
+    # Matches backtest: active_trade management (L700-826) runs AFTER
+    # structural/VP feeds but blocks state machine via `continue`
+    # ======================================================================
+    if has_position_or_order(mt5_symbol):
+        result['has_position'] = True
+        result['event'] = "POSITION_ACTIVE"
+        result['state_after'] = asset_state.state
+        return result
 
     # Hors session -> INSIDE (after structural + VP + ghost, matching backtest order)
     if not asset_sessions.get(curr_sess, False):
