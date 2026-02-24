@@ -205,7 +205,7 @@ ASSETS = [
 # =============================================================================
 # PARAMETRES LIVE
 # =============================================================================
-LOOP_INTERVAL_SECONDS = 5
+LOOP_INTERVAL_SECONDS = 1
 STATE_FILE = "combined_mr_cb_state.json"
 
 logging.basicConfig(
