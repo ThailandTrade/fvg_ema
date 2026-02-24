@@ -713,13 +713,13 @@ def load_all_states(asset_states: dict):
         for symbol, saved in data.items():
             if symbol in asset_states:
                 asset_states[symbol].from_dict(saved)
-                logger.info(f"[{symbol}] State restored: {saved['state']} | swing: {saved['swing_extreme']}")
+                logger.info(f"[{symbol}] State restored: {saved['state']} | candles_since_breakout: {saved.get('candles_since_breakout', 0)}")
     except Exception as e:
         logger.error(f"Failed to load state: {e}")
 
 
 # =============================================================================
-# MAIN TRADING LOGIC - ALIGNÉ SUR BACKTEST v3
+# MAIN TRADING LOGIC - Combined MR + CB
 # =============================================================================
 
 def detect_and_trade(asset_state: AssetState, engine, account_balance: float) -> dict:
