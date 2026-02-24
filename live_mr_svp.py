@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Live Trading - VP Failed Breakout Strategy
-ALIGNÉ EXACTEMENT SUR LE BACKTEST v3
+Live Trading - Combined MR + CB Strategy
+ALIGNÉ EXACTEMENT SUR LE BACKTEST combined_mr_breakout
 """
 
 import MetaTrader5 as mt5
@@ -21,26 +21,46 @@ from sqlalchemy import create_engine
 load_dotenv()
 
 # =============================================================================
-# CONFIGURATION - IDENTIQUE AU BACKTEST
+# CONFIGURATION - ALIGNÉ SUR BACKTEST combined_mr_breakout
 # =============================================================================
 
+# Strategy enable/disable
+ENABLE_MR = True          # Mean Reversion after reintegration
+ENABLE_CB = True          # Confirmed Breakout after sustained breakout
+
 RISK_PERCENT = 0.001  # 0.1% par trade
+WAIT_CANDLES = 3      # Candles to wait after breakout before deciding MR or CB
 
-# Mode de target
-TP_MODE = "POC"  # "FIXED_RR" = R:R fixe | "POC" = Target au POC
-TARGET_RR = 3.0
-MIN_RR = 2.0     # R:R minimum pour ENTRER en position
+# =============================================================================
+# MR-SPECIFIC CONFIG (Mean Reversion)
+# =============================================================================
+MR_MIN_RR = 1.5
+MR_SL_OFFSET = 1.0
+MR_TP1_RR = 1.5
+MR_TP1_SPLIT = 0.7
+MR_TP2_SPLIT = 0.3
+MR_USE_TRAILING = True
+MR_MIN_POC_STRENGTH = 2.0
+MR_FILTER_ENTRY_VS_POC = True
+MR_MAX_BREAKOUT_DURATION_MINUTES = 3
+MR_EXCLUDED_HOURS = []
 
-# Trailing
-USE_TRAILING = True
-TP1_RR = 1.3      # R:R ou on ferme 50% et met BE
+# =============================================================================
+# CB-SPECIFIC CONFIG (Confirmed Breakout)
+# =============================================================================
+CB_MIN_RR = 2.0
+CB_SL_OFFSET = 0.75
+CB_TP1_RR = 1.0
+CB_TP1_SPLIT = 0.3
+CB_TP2_SPLIT = 0.7
+CB_USE_TRAILING = True
+CB_MIN_POC_STRENGTH = 3.0
+CB_EXCLUDED_HOURS = [0, 10]
+CB_EXCLUDE_VAH_TARGET = True
+CB_USE_PREV_DAY = True
+CB_USE_PREV_WEEK = True
 
-# Filtres globaux
-FILTER_ENTRY_VS_POC = True
-USE_BREAKOUT_DURATION_FILTER = True
-MAX_BREAKOUT_DURATION_MINUTES = 4
-USE_VP_STRUCTURE_FILTER = True
-MIN_POC_STRENGTH = 2.5
+# Shared filters
 USE_VP_SHAPE_FILTER = True
 EXCLUDED_VP_SHAPES = [""]
 
@@ -72,8 +92,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 0.50,
-        'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
+        'sessions': {'TOKYO': True, 'LONDON': True, 'NY': False},
+        'allowed_days': [0, 1, 2, 3, 4],
     },{
         'enabled': False,
         'symbol': 'XAGUSD',
@@ -84,8 +104,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 0.50,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
+        'allowed_days': [0, 1, 2, 3, 4],
     },
     {
         'enabled': False,
@@ -97,8 +117,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 1.0,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': True},
+        'allowed_days': [0, 1, 2, 3, 4],
     },
     {
         'enabled': False,
@@ -110,8 +130,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': False,
         'allow_short': True,
-        'sl_offset': 1.0,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
+        'allowed_days': [0, 1, 2, 3, 4],
     },
     {
         'enabled': False,
@@ -123,8 +143,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 1.0,
         'sessions': {'TOKYO': True, 'LONDON': False, 'NY': True},
+        'allowed_days': [0, 1, 2, 3, 4],
     },
     {
         'enabled': False,
@@ -136,8 +156,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': False,
-        'sl_offset': 1.0,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
+        'allowed_days': [0, 1, 2, 3, 4],
     },
     {
         'enabled': False,
@@ -149,8 +169,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': False,
         'allow_short': True,
-        'sl_offset': 0.10,
         'sessions': {'TOKYO': False, 'LONDON': True, 'NY': False},
+        'allowed_days': [0, 1, 2, 3, 4],
     },
     {
         'enabled': False,
@@ -162,8 +182,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 0.10,
         'sessions': {'TOKYO': True, 'LONDON': True, 'NY': True},
+        'allowed_days': [0, 1, 2, 3, 4],
     },
     {
         'enabled': False,
@@ -175,8 +195,8 @@ ASSETS = [
         'va_percent': 0.70,
         'allow_long': True,
         'allow_short': True,
-        'sl_offset': 0.10,
         'sessions': {'TOKYO': True, 'LONDON': False, 'NY': True},
+        'allowed_days': [0, 1, 2, 3, 4],
     },
 ]
 
@@ -184,7 +204,7 @@ ASSETS = [
 # PARAMETRES LIVE
 # =============================================================================
 LOOP_INTERVAL_SECONDS = 5
-STATE_FILE = "vp_failed_breakout_state.json"
+STATE_FILE = "combined_mr_cb_state.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -320,6 +340,69 @@ class IncrementalVolumeProfile:
         else:
             return "D-SHAPE"
 
+    def snapshot(self):
+        poc, vah, val = self.get_levels()
+        return {'poc': poc, 'vah': vah, 'val': val}
+
+
+# =============================================================================
+# STRUCTURAL LEVELS TRACKER (for CB targets)
+# =============================================================================
+
+class StructuralLevelsTracker:
+    def __init__(self, tick_size=0.01, va_percent=0.70):
+        self.tick_size = tick_size
+        self.va_percent = va_percent
+        self._daily_vp = IncrementalVolumeProfile(tick_size, va_percent)
+        self._weekly_vp = IncrementalVolumeProfile(tick_size, va_percent)
+        self.prev_day = {'poc': None, 'vah': None, 'val': None}
+        self.prev_week = {'poc': None, 'vah': None, 'val': None}
+        self._current_day = None
+        self._current_week_start = None
+
+    def update(self, dt, prices, volumes):
+        day = dt.date()
+        week_start = (dt - timedelta(days=dt.weekday())).date()
+        if self._current_day is not None and day != self._current_day:
+            snap = self._daily_vp.snapshot()
+            if snap['poc'] is not None:
+                self.prev_day = snap
+            self._daily_vp.reset()
+        if self._current_week_start is not None and week_start != self._current_week_start:
+            snap = self._weekly_vp.snapshot()
+            if snap['poc'] is not None:
+                self.prev_week = snap
+            self._weekly_vp.reset()
+        self._current_day = day
+        self._current_week_start = week_start
+        if len(prices) > 0:
+            self._daily_vp.add_ticks(prices, volumes)
+            self._weekly_vp.add_ticks(prices, volumes)
+
+    def get_target_levels(self, direction: str, entry_price: float):
+        candidates = []
+        if CB_USE_PREV_DAY:
+            if self.prev_day['vah'] is not None and not CB_EXCLUDE_VAH_TARGET:
+                candidates.append(('PD_VAH', self.prev_day['vah']))
+            if self.prev_day['val'] is not None:
+                candidates.append(('PD_VAL', self.prev_day['val']))
+            if self.prev_day['poc'] is not None:
+                candidates.append(('PD_POC', self.prev_day['poc']))
+        if CB_USE_PREV_WEEK:
+            if self.prev_week['vah'] is not None and not CB_EXCLUDE_VAH_TARGET:
+                candidates.append(('PW_VAH', self.prev_week['vah']))
+            if self.prev_week['val'] is not None:
+                candidates.append(('PW_VAL', self.prev_week['val']))
+            if self.prev_week['poc'] is not None:
+                candidates.append(('PW_POC', self.prev_week['poc']))
+        if direction == 'LONG':
+            valid = [(label, price) for label, price in candidates if price > entry_price]
+            valid.sort(key=lambda x: x[1])
+        else:
+            valid = [(label, price) for label, price in candidates if price < entry_price]
+            valid.sort(key=lambda x: -x[1])
+        return valid
+
 
 # =============================================================================
 # SESSION HELPERS
@@ -421,19 +504,19 @@ def manage_tp1_to_be(symbol: str, tick_size: float):
     positions = mt5.positions_get(symbol=symbol)
     if not positions:
         return
-    
-    our_positions = [p for p in positions if "VP_FailedBO" in (p.comment or "")]
+
+    our_positions = [p for p in positions if any(tag in (p.comment or "") for tag in ("VP_MR", "VP_CB"))]
     tp2_positions = [p for p in our_positions if "_TP2" in (p.comment or "")]
     tp1_positions = [p for p in our_positions if "_TP1" in (p.comment or "")]
-    
+
     if len(tp1_positions) == 0 and len(tp2_positions) == 1:
         pos = tp2_positions[0]
         entry_price = pos.price_open
         current_sl = pos.sl
-        
+
         if abs(current_sl - entry_price) > tick_size * 2:
             new_sl = qround(entry_price, tick_size)
-            
+
             request = {
                 "action": mt5.TRADE_ACTION_SLTP,
                 "symbol": symbol,
@@ -441,7 +524,7 @@ def manage_tp1_to_be(symbol: str, tick_size: float):
                 "sl": new_sl,
                 "tp": pos.tp,
             }
-            
+
             result = mt5.order_send(request)
             if result.retcode == mt5.TRADE_RETCODE_DONE:
                 logger.info(f"[{symbol}] TP1 hit - SL moved to BE @ {new_sl}")
@@ -450,35 +533,35 @@ def manage_tp1_to_be(symbol: str, tick_size: float):
 
 
 def place_market_order(symbol: str, order_type: str, entry: float, sl: float, tp1: float, tp2: float,
-                       risk_amount: float, tick_size: float, comment: str = "VP_FailedBO") -> bool:
+                       risk_amount: float, tick_size: float,
+                       tp1_split: float = 0.5, tp2_split: float = 0.5,
+                       strategy: str = "VP_MR") -> bool:
     info = mt5.symbol_info(symbol)
     if info is None:
         logger.error(f"[{symbol}] Symbol info not found")
         return False
-    
+
     sl = qround(sl, tick_size)
     tp1 = qround(tp1, tick_size)
     tp2 = qround(tp2, tick_size)
-    
-    risk_per_order = risk_amount / 2
-    
-    lot1 = get_lot_size(symbol, entry, sl, risk_per_order)
-    lot2 = get_lot_size(symbol, entry, sl, risk_per_order)
-    
+
+    lot1 = get_lot_size(symbol, entry, sl, risk_amount * tp1_split)
+    lot2 = get_lot_size(symbol, entry, sl, risk_amount * tp2_split)
+
     if lot1 <= 0 or lot2 <= 0:
         logger.error(f"[{symbol}] Invalid lot size: lot1={lot1}, lot2={lot2}")
         return False
-    
+
     mt5_type = mt5.ORDER_TYPE_BUY if order_type == "BUY" else mt5.ORDER_TYPE_SELL
     price = info.ask if order_type == "BUY" else info.bid
-    
-    logger.info(f"[{symbol}] ====== PLACING TRADE ======")
+
+    logger.info(f"[{symbol}] ====== PLACING {strategy} TRADE ======")
     logger.info(f"[{symbol}] Direction: {order_type} | Entry: {price} | SL: {sl}")
     logger.info(f"[{symbol}] TP1: {tp1} | TP2: {tp2}")
-    logger.info(f"[{symbol}] Risk/order: ${risk_per_order:.2f} | Lot1: {lot1} | Lot2: {lot2}")
-    
+    logger.info(f"[{symbol}] Risk: ${risk_amount:.2f} | Split: {tp1_split:.0%}/{tp2_split:.0%} | Lot1: {lot1} | Lot2: {lot2}")
+
     success_count = 0
-    
+
     request1 = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
@@ -489,17 +572,17 @@ def place_market_order(symbol: str, order_type: str, entry: float, sl: float, tp
         "tp": tp1,
         "deviation": 20,
         "magic": 123456,
-        "comment": f"{comment}_TP1",
+        "comment": f"{strategy}_TP1",
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
-    
+
     result1 = mt5.order_send(request1)
     if result1.retcode == mt5.TRADE_RETCODE_DONE:
         logger.info(f"[{symbol}] TP1 FILLED: {order_type} {lot1} lots @ {result1.price}")
         success_count += 1
     else:
         logger.error(f"[{symbol}] TP1 FAILED: {result1.retcode} - {result1.comment}")
-    
+
     request2 = {
         "action": mt5.TRADE_ACTION_DEAL,
         "symbol": symbol,
@@ -510,17 +593,17 @@ def place_market_order(symbol: str, order_type: str, entry: float, sl: float, tp
         "tp": tp2,
         "deviation": 20,
         "magic": 123456,
-        "comment": f"{comment}_TP2",
+        "comment": f"{strategy}_TP2",
         "type_filling": mt5.ORDER_FILLING_IOC,
     }
-    
+
     result2 = mt5.order_send(request2)
     if result2.retcode == mt5.TRADE_RETCODE_DONE:
         logger.info(f"[{symbol}] TP2 FILLED: {order_type} {lot2} lots @ {result2.price}")
         success_count += 1
     else:
         logger.error(f"[{symbol}] TP2 FAILED: {result2.retcode} - {result2.comment}")
-    
+
     logger.info(f"[{symbol}] ====== TRADE COMPLETE: {success_count}/2 orders filled ======")
     return success_count > 0
 
@@ -561,38 +644,51 @@ class AssetState:
         self.symbol = config['symbol']
         self.mt5_symbol = config['mt5_symbol']
         self.vp = IncrementalVolumeProfile(tick_size=config['tick_size'], va_percent=config['va_percent'])
+        self.structural = StructuralLevelsTracker(tick_size=config['tick_size'], va_percent=config['va_percent'])
         self.state = "INSIDE"
-        self.swing_extreme = 0.0
+        self.breakout_direction = None
         self.breakout_time = None
-        self.breakout_price = None
+        self.candles_since_breakout = 0
+        self.wait_highs = []
+        self.wait_lows = []
+        self.ghost_trade = None
         self.current_session = None
         self.last_trade_candle_ts = 0
         self.last_candle_ts = 0
-    
+
     def reset_vp(self):
         self.vp.reset()
         self.state = "INSIDE"
-        self.swing_extreme = 0.0
+        self.breakout_direction = None
         self.breakout_time = None
-        self.breakout_price = None
-    
+        self.candles_since_breakout = 0
+        self.wait_highs = []
+        self.wait_lows = []
+        self.ghost_trade = None
+
     def to_dict(self) -> dict:
         return {
             'state': self.state,
-            'swing_extreme': self.swing_extreme,
+            'breakout_direction': self.breakout_direction,
             'breakout_time': self.breakout_time.isoformat() if self.breakout_time else None,
-            'breakout_price': self.breakout_price,
+            'candles_since_breakout': self.candles_since_breakout,
+            'wait_highs': self.wait_highs,
+            'wait_lows': self.wait_lows,
+            'ghost_trade': self.ghost_trade,
             'current_session': self.current_session,
             'last_trade_candle_ts': self.last_trade_candle_ts,
             'last_candle_ts': self.last_candle_ts,
         }
-    
+
     def from_dict(self, data: dict):
         self.state = data.get('state', 'INSIDE')
-        self.swing_extreme = data.get('swing_extreme', 0.0)
+        self.breakout_direction = data.get('breakout_direction')
         bt = data.get('breakout_time')
         self.breakout_time = datetime.fromisoformat(bt) if bt else None
-        self.breakout_price = data.get('breakout_price')
+        self.candles_since_breakout = data.get('candles_since_breakout', 0)
+        self.wait_highs = data.get('wait_highs', [])
+        self.wait_lows = data.get('wait_lows', [])
+        self.ghost_trade = data.get('ghost_trade')
         self.current_session = data.get('current_session')
         self.last_trade_candle_ts = data.get('last_trade_candle_ts', 0)
         self.last_candle_ts = data.get('last_candle_ts', 0)
@@ -630,7 +726,7 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
     config = asset_state.config
     symbol = config['symbol']
     mt5_symbol = config['mt5_symbol']
-    
+
     result = {
         'new_candle': False,
         'symbol': symbol,
@@ -646,56 +742,94 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
         'val': None,
         'poc_strength': None,
         'vp_shape': None,
-        'swing_extreme': asset_state.swing_extreme,
         'event': None,
         'event_details': None,
         'has_position': False,
     }
-    
+
     # Check position existante
     if has_position_or_order(mt5_symbol):
         result['has_position'] = True
         result['event'] = "POSITION_ACTIVE"
         return result
-    
+
     # Charger les candles
     candles = fetch_candles_from_db(engine, config['candle_table'], limit=5)
     if not candles:
         result['event'] = "NO_DATA"
         return result
-    
+
     last_candle = candles[-1]
     close = last_candle['close']
     high = last_candle['high']
     low = last_candle['low']
     candle_dt = last_candle['dt']
     candle_ts = last_candle['ts']
-    
+
     result['candle_dt'] = candle_dt
     result['close'] = close
     result['high'] = high
     result['low'] = low
-    
+
     # Vérifier si c'est une nouvelle bougie
     if asset_state.last_candle_ts == candle_ts:
         result['new_candle'] = False
         return result
-    
+
     result['new_candle'] = True
     asset_state.last_candle_ts = candle_ts
-    
-    # Déterminer la session (basé sur vp_start/vp_end)
+
+    # ======================================================================
+    # GHOST TRADE MANAGEMENT
+    # ======================================================================
+    ghost = asset_state.ghost_trade
+    if ghost:
+        ghost_done = False
+        if ghost['type'] == 'LONG':
+            if low <= ghost['sl']:
+                ghost_done = True
+            else:
+                if not ghost['partial_closed']:
+                    tp1_price = ghost['entry'] + (ghost['risk'] * ghost['tp1_rr'])
+                    if high >= tp1_price:
+                        ghost['partial_closed'] = True
+                        ghost['sl'] = ghost['entry']
+                if high >= ghost['tp']:
+                    ghost_done = True
+        else:  # SHORT
+            if high >= ghost['sl']:
+                ghost_done = True
+            else:
+                if not ghost['partial_closed']:
+                    tp1_price = ghost['entry'] - (ghost['risk'] * ghost['tp1_rr'])
+                    if low <= tp1_price:
+                        ghost['partial_closed'] = True
+                        ghost['sl'] = ghost['entry']
+                if low <= ghost['tp']:
+                    ghost_done = True
+        if ghost_done:
+            logger.info(f"[{symbol}] Ghost trade ended ({ghost['type']})")
+            asset_state.ghost_trade = None
+        else:
+            result['event'] = "GHOST_ACTIVE"
+            result['event_details'] = f"{ghost['type']} entry={ghost['entry']:.2f} sl={ghost['sl']:.2f} tp={ghost['tp']:.2f}"
+            result['state_after'] = asset_state.state
+            return result
+
+    # Déterminer la session
     curr_sess = get_session(candle_dt)
     result['session'] = curr_sess
     asset_sessions = config.get('sessions', {})
-    
+
     # Hors session -> INSIDE
     if not asset_sessions.get(curr_sess, False):
         asset_state.state = "INSIDE"
+        asset_state.breakout_direction = None
+        asset_state.candles_since_breakout = 0
         result['state_after'] = "INSIDE"
         result['event'] = "OUT_OF_SESSION"
         return result
-    
+
     # Reset VP au debut de session
     if RESET_VP_PER_SESSION:
         session_start = is_session_start(candle_dt)
@@ -704,231 +838,329 @@ def detect_and_trade(asset_state: AssetState, engine, account_balance: float) ->
             asset_state.current_session = session_start
             result['event'] = "SESSION_START"
             result['event_details'] = session_start
-    
+
     # Construire VP depuis debut de session jusqu'à FIN de la bougie actuelle
     session_cfg = SESSIONS_CONFIG.get(curr_sess, {})
-    session_start_hour = session_cfg.get('vp_start', 0)  # Utilise vp_start
+    session_start_hour = session_cfg.get('vp_start', 0)
     session_start_dt = candle_dt.replace(hour=int(session_start_hour), minute=int((session_start_hour % 1) * 60), second=0, microsecond=0)
     if session_start_dt > candle_dt:
         session_start_dt -= timedelta(days=1)
-    
-    # end_dt = début de la minute SUIVANTE (pour inclure toute la minute actuelle)
+
     end_dt = candle_dt + timedelta(minutes=1)
-    
+
     prices, volumes = fetch_ticks_from_db(engine, config['tick_table'], session_start_dt, end_dt)
-    
+
     if len(prices) > 0:
         asset_state.vp.reset()
         asset_state.vp.add_ticks(prices, volumes)
-    
+
+    # Update structural levels tracker with ticks for current minute
+    tick_start = candle_dt
+    tick_end = candle_dt + timedelta(minutes=1)
+    tick_prices, tick_volumes = fetch_ticks_from_db(engine, config['tick_table'], tick_start, tick_end)
+    asset_state.structural.update(candle_dt, tick_prices, tick_volumes)
+
     poc, vah, val = asset_state.vp.get_levels()
     if poc is None:
         result['event'] = "NO_VP"
         result['event_details'] = f"0 ticks from {session_start_dt.strftime('%H:%M')} to {end_dt.strftime('%H:%M')}"
         result['state_after'] = asset_state.state
         return result
-    
+
     poc_strength = asset_state.vp.get_poc_strength()
     vp_shape = asset_state.vp.get_profile_shape()
-    
+
     result['poc'] = poc
     result['vah'] = vah
     result['val'] = val
     result['poc_strength'] = poc_strength
     result['vp_shape'] = vp_shape
-    
+
     state = asset_state.state
-    
-    # ==========================================================================
-    # STATE MACHINE
-    # ==========================================================================
-    
+
+    # ======================================================================
+    # STATE MACHINE — Combined MR + CB
+    # ======================================================================
+
     if state == "INSIDE":
         if close > vah:
             asset_state.state = "BREAKOUT_UP"
-            asset_state.swing_extreme = high
+            asset_state.breakout_direction = "UP"
             asset_state.breakout_time = candle_dt
-            asset_state.breakout_price = close
+            asset_state.candles_since_breakout = 1
+            asset_state.wait_highs = [high]
+            asset_state.wait_lows = [low]
             result['event'] = "BREAKOUT_UP"
-            result['swing_extreme'] = high
         elif close < val:
             asset_state.state = "BREAKOUT_DOWN"
-            asset_state.swing_extreme = low
+            asset_state.breakout_direction = "DOWN"
             asset_state.breakout_time = candle_dt
-            asset_state.breakout_price = close
+            asset_state.candles_since_breakout = 1
+            asset_state.wait_highs = [high]
+            asset_state.wait_lows = [low]
             result['event'] = "BREAKOUT_DOWN"
-            result['swing_extreme'] = low
         else:
             result['event'] = "INSIDE"
-    
-    elif state == "BREAKOUT_UP":
-        asset_state.swing_extreme = max(asset_state.swing_extreme, high)
-        result['swing_extreme'] = asset_state.swing_extreme
-        
-        if close < vah:
-            # Failed breakout UP - évaluer SHORT
+
+    elif state in ("BREAKOUT_UP", "BREAKOUT_DOWN"):
+        asset_state.candles_since_breakout += 1
+        asset_state.wait_highs.append(high)
+        asset_state.wait_lows.append(low)
+
+        breakout_dir = asset_state.breakout_direction
+        reintegrated = False
+        confirmed_outside = False
+
+        # Check reintegration (strict: close INSIDE VA)
+        if ENABLE_MR:
+            if breakout_dir == "UP" and close < vah:
+                reintegrated = True
+            elif breakout_dir == "DOWN" and close > val:
+                reintegrated = True
+        else:
+            if breakout_dir == "UP" and close <= vah:
+                reintegrated = True
+            elif breakout_dir == "DOWN" and close >= val:
+                reintegrated = True
+
+        # Check confirmed breakout
+        if not reintegrated and asset_state.candles_since_breakout >= WAIT_CANDLES:
+            confirmed_outside = True
+
+        # ==============================================================
+        # MR ATTEMPT (reintegrated)
+        # ==============================================================
+        if reintegrated and ENABLE_MR:
+            direction = 'SHORT' if breakout_dir == "UP" else 'LONG'
+
+            can_direction = (direction == 'LONG' and config['allow_long']) or (direction == 'SHORT' and config['allow_short'])
+            can_time = can_trade_now(candle_dt, curr_sess)
+            day_ok = candle_dt.weekday() in config.get('allowed_days', [0, 1, 2, 3, 4])
+            hour_ok = candle_dt.hour not in MR_EXCLUDED_HOURS
+
+            mr_poc_ok = True
+            if poc_strength is None or poc_strength < MR_MIN_POC_STRENGTH:
+                mr_poc_ok = False
+                result['event'] = "MR_FILTERED_POC_STRENGTH"
+                result['event_details'] = f"{poc_strength:.2f}x < {MR_MIN_POC_STRENGTH}x"
+
+            mr_duration_ok = True
             breakout_duration_min = (candle_dt - asset_state.breakout_time).total_seconds() / 60.0
-            
-            duration_ok = True
-            poc_strength_ok = True
-            vp_shape_ok = True
-            
-            if USE_BREAKOUT_DURATION_FILTER:
-                if breakout_duration_min >= MAX_BREAKOUT_DURATION_MINUTES:
-                    duration_ok = False
-                    result['event'] = "FILTERED_DURATION"
-                    result['event_details'] = f"{breakout_duration_min:.1f}min >= {MAX_BREAKOUT_DURATION_MINUTES}min"
-            
-            if USE_VP_STRUCTURE_FILTER:
-                if poc_strength is None or poc_strength < MIN_POC_STRENGTH:
-                    poc_strength_ok = False
-                    if duration_ok:
-                        result['event'] = "FILTERED_POC_STRENGTH"
-                        result['event_details'] = f"{poc_strength:.2f}x < {MIN_POC_STRENGTH}x"
-            
-            if USE_VP_SHAPE_FILTER:
-                if vp_shape in EXCLUDED_VP_SHAPES:
-                    vp_shape_ok = False
-                    if duration_ok and poc_strength_ok:
-                        result['event'] = "FILTERED_VP_SHAPE"
-                        result['event_details'] = vp_shape
-            
-            # Vérifier can_trade_now (heures de trade)
-            if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_short'] and can_trade_now(candle_dt, curr_sess):
-                sl = asset_state.swing_extreme + config['sl_offset']
-                risk = sl - close
-                
-                if TP_MODE == "POC":
-                    tp = poc
-                    actual_rr = (close - tp) / risk if risk > 0 else 0
-                    if actual_rr > 15:
-                        result['event'] = "FILTERED_RR_ABERRANT"
-                        result['event_details'] = f"RR={actual_rr:.1f}"
-                        asset_state.state = "INSIDE"
-                        result['state_after'] = "INSIDE"
-                        return result
+            if breakout_duration_min >= MR_MAX_BREAKOUT_DURATION_MINUTES:
+                mr_duration_ok = False
+                if mr_poc_ok:
+                    result['event'] = "MR_FILTERED_DURATION"
+                    result['event_details'] = f"{breakout_duration_min:.1f}min >= {MR_MAX_BREAKOUT_DURATION_MINUTES}min"
+
+            shape_ok = True
+            if USE_VP_SHAPE_FILTER and vp_shape in EXCLUDED_VP_SHAPES:
+                shape_ok = False
+
+            if mr_poc_ok and mr_duration_ok and shape_ok and can_direction and can_time and day_ok and hour_ok:
+                if direction == 'SHORT':
+                    swing_high = max(asset_state.wait_highs)
+                    sl = swing_high + MR_SL_OFFSET
+                    risk = sl - close
                 else:
-                    tp = close - (risk * TARGET_RR)
-                    actual_rr = TARGET_RR
-                
-                poc_ok = (close >= poc) if FILTER_ENTRY_VS_POC else True
-                rr_ok = actual_rr >= MIN_RR
-                
-                if risk > 0 and tp >= val and poc_ok and rr_ok:
-                    tp1 = close - (risk * TP1_RR)
+                    swing_low = min(asset_state.wait_lows)
+                    sl = swing_low - MR_SL_OFFSET
+                    risk = close - sl
+
+                if risk > 0:
+                    tp = poc
+                    if direction == 'SHORT':
+                        actual_rr = (close - tp) / risk
+                    else:
+                        actual_rr = (tp - close) / risk
+
+                    poc_filter_ok = True
+                    if MR_FILTER_ENTRY_VS_POC:
+                        if direction == 'SHORT' and close < poc:
+                            poc_filter_ok = False
+                        elif direction == 'LONG' and close > poc:
+                            poc_filter_ok = False
+
+                    rr_ok = MR_MIN_RR <= actual_rr <= 30
+                    tp_in_va = True
+                    if direction == 'SHORT' and tp < val:
+                        tp_in_va = False
+                    if direction == 'LONG' and tp > vah:
+                        tp_in_va = False
+
+                    if rr_ok and poc_filter_ok and tp_in_va:
+                        if MR_USE_TRAILING:
+                            if direction == 'LONG':
+                                tp1 = close + (risk * MR_TP1_RR)
+                            else:
+                                tp1 = close - (risk * MR_TP1_RR)
+                        else:
+                            tp1 = tp
+
+                        tp2 = tp
+                        risk_amount = account_balance * RISK_PERCENT
+
+                        order_type = "BUY" if direction == 'LONG' else "SELL"
+                        result['event'] = f"MR_TRADE_{direction}"
+                        result['event_details'] = f"Entry={close} SL={sl:.2f} TP1={tp1:.2f} TP2={tp2:.2f} RR={actual_rr:.2f}"
+
+                        success = place_market_order(
+                            mt5_symbol, order_type, close, sl, tp1, tp2,
+                            risk_amount, config['tick_size'],
+                            tp1_split=MR_TP1_SPLIT, tp2_split=MR_TP2_SPLIT,
+                            strategy="VP_MR"
+                        )
+                        if success:
+                            asset_state.last_trade_candle_ts = candle_ts
+                    else:
+                        if result['event'] is None:
+                            reasons = []
+                            if not rr_ok: reasons.append(f"RR={actual_rr:.2f}")
+                            if not poc_filter_ok: reasons.append("entry_vs_poc")
+                            if not tp_in_va: reasons.append("tp_outside_va")
+                            result['event'] = "MR_FILTERED_ENTRY"
+                            result['event_details'] = ", ".join(reasons)
+            elif can_direction and not can_time:
+                if result['event'] is None:
+                    result['event'] = "MR_FILTERED_TRADE_HOURS"
+
+            # Reset after MR attempt
+            asset_state.state = "INSIDE"
+            asset_state.breakout_direction = None
+            asset_state.candles_since_breakout = 0
+            asset_state.wait_highs = []
+            asset_state.wait_lows = []
+
+        # ==============================================================
+        # CB ATTEMPT (confirmed outside)
+        # ==============================================================
+        elif confirmed_outside and ENABLE_CB:
+            direction = 'LONG' if breakout_dir == "UP" else 'SHORT'
+
+            can_direction = (direction == 'LONG' and config['allow_long']) or (direction == 'SHORT' and config['allow_short'])
+            can_time = can_trade_now(candle_dt, curr_sess)
+            day_ok = candle_dt.weekday() in config.get('allowed_days', [0, 1, 2, 3, 4])
+            hour_ok = candle_dt.hour not in CB_EXCLUDED_HOURS
+
+            cb_poc_ok = True
+            if poc_strength is None or poc_strength < CB_MIN_POC_STRENGTH:
+                cb_poc_ok = False
+                result['event'] = "CB_FILTERED_POC_STRENGTH"
+                result['event_details'] = f"{poc_strength:.2f}x < {CB_MIN_POC_STRENGTH}x"
+
+            shape_ok = True
+            if USE_VP_SHAPE_FILTER and vp_shape in EXCLUDED_VP_SHAPES:
+                shape_ok = False
+
+            if cb_poc_ok and shape_ok and can_direction and can_time and day_ok and hour_ok:
+                if direction == 'LONG':
+                    swing_low = min(asset_state.wait_lows)
+                    sl = swing_low - CB_SL_OFFSET
+                    risk = close - sl
+                else:
+                    swing_high = max(asset_state.wait_highs)
+                    sl = swing_high + CB_SL_OFFSET
+                    risk = sl - close
+
+                if risk > 0:
+                    # Structural target
+                    targets = asset_state.structural.get_target_levels(direction, close)
+
+                    tp = None
+                    tp_label = None
+                    for label, price in targets:
+                        if direction == 'LONG':
+                            rr = (price - close) / risk
+                        else:
+                            rr = (close - price) / risk
+                        if CB_MIN_RR <= rr <= 30:
+                            tp = price
+                            tp_label = label
+                            break
+
+                    # Ghost trade: PD_POC target → block slot without risking capital
+                    if tp is not None and tp_label == 'PD_POC':
+                        asset_state.ghost_trade = {
+                            'type': direction, 'entry': close, 'sl': sl, 'tp': tp,
+                            'tp1_rr': CB_TP1_RR, 'risk': risk,
+                            'partial_closed': False,
+                        }
+                        logger.info(f"[{symbol}] Ghost trade started: {direction} entry={close:.2f} sl={sl:.2f} tp={tp:.2f} (PD_POC)")
+                        result['event'] = "CB_GHOST_TRADE"
+                        result['event_details'] = f"{direction} → PD_POC={tp:.2f}"
+                        asset_state.state = "INSIDE"
+                        asset_state.breakout_direction = None
+                        asset_state.candles_since_breakout = 0
+                        asset_state.wait_highs = []
+                        asset_state.wait_lows = []
+                        result['state_after'] = asset_state.state
+                        return result
+
+                    if tp is None:
+                        # Fallback: fixed RR
+                        if direction == 'LONG':
+                            tp = close + (risk * CB_MIN_RR)
+                        else:
+                            tp = close - (risk * CB_MIN_RR)
+                        tp_label = f"FIXED_{CB_MIN_RR}R"
+                        actual_rr = CB_MIN_RR
+                    else:
+                        if direction == 'LONG':
+                            actual_rr = (tp - close) / risk
+                        else:
+                            actual_rr = (close - tp) / risk
+
+                    if CB_USE_TRAILING:
+                        if direction == 'LONG':
+                            tp1 = close + (risk * CB_TP1_RR)
+                        else:
+                            tp1 = close - (risk * CB_TP1_RR)
+                    else:
+                        tp1 = tp
+
                     tp2 = tp
                     risk_amount = account_balance * RISK_PERCENT
-                    
-                    result['event'] = "TRADE_SHORT"
-                    result['event_details'] = f"Entry={close} SL={sl} TP1={tp1:.2f} TP2={tp2:.2f} RR={actual_rr:.2f}"
-                    
-                    success = place_market_order(mt5_symbol, "SELL", close, sl, tp1, tp2, risk_amount, config['tick_size'])
+
+                    order_type = "BUY" if direction == 'LONG' else "SELL"
+                    result['event'] = f"CB_TRADE_{direction}"
+                    result['event_details'] = f"Entry={close} SL={sl:.2f} TP1={tp1:.2f} TP2={tp2:.2f} RR={actual_rr:.2f} Target={tp_label}"
+
+                    success = place_market_order(
+                        mt5_symbol, order_type, close, sl, tp1, tp2,
+                        risk_amount, config['tick_size'],
+                        tp1_split=CB_TP1_SPLIT, tp2_split=CB_TP2_SPLIT,
+                        strategy="VP_CB"
+                    )
                     if success:
                         asset_state.last_trade_candle_ts = candle_ts
-                else:
-                    if result['event'] is None:
-                        reasons = []
-                        if risk <= 0: reasons.append(f"risk={risk:.2f}")
-                        if tp < val: reasons.append(f"TP<VAL")
-                        if not poc_ok: reasons.append(f"close<POC")
-                        if not rr_ok: reasons.append(f"RR={actual_rr:.2f}<{MIN_RR}")
-                        result['event'] = "FILTERED_ENTRY"
-                        result['event_details'] = ", ".join(reasons)
-            elif duration_ok and poc_strength_ok and vp_shape_ok and config['allow_short'] and not can_trade_now(candle_dt, curr_sess):
-                # Filtré par les heures de trade
+
+            elif can_direction and not can_time:
                 if result['event'] is None:
-                    result['event'] = "FILTERED_TRADE_HOURS"
-                    result['event_details'] = f"Outside trade hours for {curr_sess}"
-            
+                    result['event'] = "CB_FILTERED_TRADE_HOURS"
+
+            # Reset after CB attempt
             asset_state.state = "INSIDE"
-        else:
-            result['event'] = "STILL_BREAKOUT_UP"
-            result['event_details'] = f"swing={asset_state.swing_extreme}"
-    
-    elif state == "BREAKOUT_DOWN":
-        asset_state.swing_extreme = min(asset_state.swing_extreme, low)
-        result['swing_extreme'] = asset_state.swing_extreme
-        
-        if close > val:
-            # Failed breakout DOWN - évaluer LONG
-            breakout_duration_min = (candle_dt - asset_state.breakout_time).total_seconds() / 60.0
-            
-            duration_ok = True
-            poc_strength_ok = True
-            vp_shape_ok = True
-            
-            if USE_BREAKOUT_DURATION_FILTER:
-                if breakout_duration_min >= MAX_BREAKOUT_DURATION_MINUTES:
-                    duration_ok = False
-                    result['event'] = "FILTERED_DURATION"
-                    result['event_details'] = f"{breakout_duration_min:.1f}min >= {MAX_BREAKOUT_DURATION_MINUTES}min"
-            
-            if USE_VP_STRUCTURE_FILTER:
-                if poc_strength is None or poc_strength < MIN_POC_STRENGTH:
-                    poc_strength_ok = False
-                    if duration_ok:
-                        result['event'] = "FILTERED_POC_STRENGTH"
-                        result['event_details'] = f"{poc_strength:.2f}x < {MIN_POC_STRENGTH}x"
-            
-            if USE_VP_SHAPE_FILTER:
-                if vp_shape in EXCLUDED_VP_SHAPES:
-                    vp_shape_ok = False
-                    if duration_ok and poc_strength_ok:
-                        result['event'] = "FILTERED_VP_SHAPE"
-                        result['event_details'] = vp_shape
-            
-            # Vérifier can_trade_now (heures de trade)
-            if duration_ok and poc_strength_ok and vp_shape_ok and config['allow_long'] and can_trade_now(candle_dt, curr_sess):
-                sl = asset_state.swing_extreme - config['sl_offset']
-                risk = close - sl
-                
-                if TP_MODE == "POC":
-                    tp = poc
-                    actual_rr = (tp - close) / risk if risk > 0 else 0
-                    if actual_rr > 15:
-                        result['event'] = "FILTERED_RR_ABERRANT"
-                        result['event_details'] = f"RR={actual_rr:.1f}"
-                        asset_state.state = "INSIDE"
-                        result['state_after'] = "INSIDE"
-                        return result
-                else:
-                    tp = close + (risk * TARGET_RR)
-                    actual_rr = TARGET_RR
-                
-                poc_ok = (close <= poc) if FILTER_ENTRY_VS_POC else True
-                rr_ok = actual_rr >= MIN_RR
-                
-                if risk > 0 and tp <= vah and poc_ok and rr_ok:
-                    tp1 = close + (risk * TP1_RR)
-                    tp2 = tp
-                    risk_amount = account_balance * RISK_PERCENT
-                    
-                    result['event'] = "TRADE_LONG"
-                    result['event_details'] = f"Entry={close} SL={sl} TP1={tp1:.2f} TP2={tp2:.2f} RR={actual_rr:.2f}"
-                    
-                    success = place_market_order(mt5_symbol, "BUY", close, sl, tp1, tp2, risk_amount, config['tick_size'])
-                    if success:
-                        asset_state.last_trade_candle_ts = candle_ts
-                else:
-                    if result['event'] is None:
-                        reasons = []
-                        if risk <= 0: reasons.append(f"risk={risk:.2f}")
-                        if tp > vah: reasons.append(f"TP>VAH")
-                        if not poc_ok: reasons.append(f"close>POC")
-                        if not rr_ok: reasons.append(f"RR={actual_rr:.2f}<{MIN_RR}")
-                        result['event'] = "FILTERED_ENTRY"
-                        result['event_details'] = ", ".join(reasons)
-            elif duration_ok and poc_strength_ok and vp_shape_ok and config['allow_long'] and not can_trade_now(candle_dt, curr_sess):
-                # Filtré par les heures de trade
-                if result['event'] is None:
-                    result['event'] = "FILTERED_TRADE_HOURS"
-                    result['event_details'] = f"Outside trade hours for {curr_sess}"
-            
+            asset_state.breakout_direction = None
+            asset_state.candles_since_breakout = 0
+            asset_state.wait_highs = []
+            asset_state.wait_lows = []
+
+        elif reintegrated and not ENABLE_MR:
+            # MR disabled, reintegration just resets
             asset_state.state = "INSIDE"
+            asset_state.breakout_direction = None
+            asset_state.candles_since_breakout = 0
+            asset_state.wait_highs = []
+            asset_state.wait_lows = []
+
+        elif confirmed_outside and not ENABLE_CB:
+            # CB disabled, stay in BREAKOUT state waiting for reintegration
+            pass
+
         else:
-            result['event'] = "STILL_BREAKOUT_DOWN"
-            result['event_details'] = f"swing={asset_state.swing_extreme}"
-    
+            # Still waiting (not enough candles, not reintegrated)
+            result['event'] = f"STILL_{state}"
+            result['event_details'] = f"candles={asset_state.candles_since_breakout}/{WAIT_CANDLES}"
+
     result['state_after'] = asset_state.state
     return result
 
@@ -937,100 +1169,154 @@ def log_candle_info(result: dict, balance: float, equity: float):
     """Log les infos importantes"""
     if not result['new_candle']:
         return
-    
+
     event = result['event'] or "NONE"
-    
+
     if event in ["INSIDE", "OUT_OF_SESSION", "STILL_BREAKOUT_UP", "STILL_BREAKOUT_DOWN"]:
         return
-    
+
     symbol = result['symbol']
     dt = result['candle_dt'].strftime('%Y-%m-%d %H:%M') if result['candle_dt'] else "N/A"
     session = result['session'] or "N/A"
-    
+
     logger.info(f"{'─' * 80}")
-    logger.info(f"[{symbol}] 🕐 {dt} UTC | Session: {session} | Balance: ${balance:,.2f} | Equity: ${equity:,.2f}")
-    
+    logger.info(f"[{symbol}] {dt} UTC | Session: {session} | Balance: ${balance:,.2f} | Equity: ${equity:,.2f}")
+
     if result['close']:
         logger.info(f"[{symbol}] Price: Close={result['close']:.2f} | High={result['high']:.2f} | Low={result['low']:.2f}")
-    
+
     if result['poc']:
         logger.info(f"[{symbol}] VP: POC={result['poc']:.2f} | VAH={result['vah']:.2f} | VAL={result['val']:.2f} | Strength={result['poc_strength']:.2f}x | Shape={result['vp_shape']}")
-    
+
     state_change = ""
     if result['state_before'] != result['state_after']:
-        state_change = f" → {result['state_after']}"
-    logger.info(f"[{symbol}] State: {result['state_before']}{state_change} | Swing: {result['swing_extreme']:.2f}")
-    
+        state_change = f" -> {result['state_after']}"
+    logger.info(f"[{symbol}] State: {result['state_before']}{state_change}")
+
     details = result['event_details'] or ""
-    
-    if event.startswith("TRADE"):
-        emoji = "🎯"
+
+    if "TRADE" in event:
+        tag = "[TRADE]"
+    elif "GHOST" in event:
+        tag = "[GHOST]"
     elif event.startswith("BREAKOUT"):
-        emoji = "⚡"
-    elif event.startswith("FILTERED"):
-        emoji = "🚫"
+        tag = "[BREAKOUT]"
+    elif "FILTERED" in event:
+        tag = "[FILTERED]"
     elif event == "SESSION_START":
-        emoji = "🔄"
+        tag = "[SESSION]"
     elif event == "POSITION_ACTIVE":
-        emoji = "📍"
+        tag = "[POSITION]"
+    elif event == "GHOST_ACTIVE":
+        tag = "[GHOST]"
     elif event == "NO_VP":
-        emoji = "⚠️"
+        tag = "[WARN]"
     else:
-        emoji = "ℹ️"
-    
+        tag = "[INFO]"
+
     if details:
-        logger.info(f"[{symbol}] {emoji} Event: {event} | {details}")
+        logger.info(f"[{symbol}] {tag} {event} | {details}")
     else:
-        logger.info(f"[{symbol}] {emoji} Event: {event}")
+        logger.info(f"[{symbol}] {tag} {event}")
 
 
 # =============================================================================
 # MAIN
 # =============================================================================
 
+def warmup_structural_levels(asset_states: dict, engine):
+    """Load historical ticks to populate prev_day and prev_week structural levels."""
+    now = datetime.now(timezone.utc)
+
+    for symbol, asset_state in asset_states.items():
+        config = asset_state.config
+        tick_table = config['tick_table']
+
+        # Load last week's ticks for prev_week
+        week_start = (now - timedelta(days=now.weekday() + 7)).replace(hour=0, minute=0, second=0, microsecond=0)
+        week_end = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+
+        logger.info(f"[{symbol}] Loading prev_week ticks: {week_start.strftime('%Y-%m-%d')} to {week_end.strftime('%Y-%m-%d')}")
+        prices, volumes = fetch_ticks_from_db(engine, tick_table, week_start, week_end)
+        if len(prices) > 0:
+            # Feed day by day to trigger day boundaries
+            tick_df = pd.DataFrame({'price': prices, 'volume': volumes})
+            # Use a single update with a representative date from last week
+            mid_week = week_start + timedelta(days=2)
+            asset_state.structural.update(mid_week, prices, volumes)
+            logger.info(f"[{symbol}] Loaded {len(prices)} prev_week ticks")
+
+        # Load yesterday's ticks for prev_day
+        yesterday_start = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        yesterday_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        logger.info(f"[{symbol}] Loading prev_day ticks: {yesterday_start.strftime('%Y-%m-%d')}")
+        prices, volumes = fetch_ticks_from_db(engine, tick_table, yesterday_start, yesterday_end)
+        if len(prices) > 0:
+            asset_state.structural.update(yesterday_start, prices, volumes)
+            logger.info(f"[{symbol}] Loaded {len(prices)} prev_day ticks")
+
+        # Trigger day boundary by feeding a tick from today
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = now
+        prices, volumes = fetch_ticks_from_db(engine, tick_table, today_start, today_end)
+        if len(prices) > 0:
+            asset_state.structural.update(now, prices, volumes)
+
+        pd = asset_state.structural.prev_day
+        pw = asset_state.structural.prev_week
+        logger.info(f"[{symbol}] Structural prev_day: POC={pd['poc']} VAH={pd['vah']} VAL={pd['val']}")
+        logger.info(f"[{symbol}] Structural prev_week: POC={pw['poc']} VAH={pw['vah']} VAL={pw['val']}")
+
+
 def main():
     logger.info("=" * 60)
-    logger.info("VP Failed Breakout - Live Trading v3")
-    logger.info("ALIGNÉ SUR BACKTEST - VP/Trade hours séparés")
+    logger.info("Combined MR + CB - Live Trading")
+    logger.info("ALIGNED ON backtest_combined_mr_breakout")
+    logger.info(f"MR={'ON' if ENABLE_MR else 'OFF'} | CB={'ON' if ENABLE_CB else 'OFF'} | WAIT_CANDLES={WAIT_CANDLES}")
     logger.info("=" * 60)
-    
+
     if not mt5.initialize():
         logger.error("MT5 initialization failed")
         return
-    
+
     account_info = mt5.account_info()
     if account_info is None:
         logger.error("Failed to get account info")
         mt5.shutdown()
         return
-    
+
     logger.info(f"Account: {account_info.login} | Balance: ${account_info.balance:,.2f}")
-    
+
     engine = get_pg_engine()
-    
+
     enabled_assets = [a for a in ASSETS if a.get('enabled', False)]
     if not enabled_assets:
         logger.error("No enabled assets")
         mt5.shutdown()
         return
-    
+
     asset_states = {}
     for config in enabled_assets:
         asset_states[config['symbol']] = AssetState(config)
         sessions = [s for s, v in config.get('sessions', {}).items() if v]
         logger.info(f"Asset: {config['symbol']} | Sessions: {sessions}")
-    
+
     load_all_states(asset_states)
-    
+
+    # Warmup structural levels (prev_day, prev_week)
+    warmup_structural_levels(asset_states, engine)
+
     # Afficher la config des sessions
     logger.info("Sessions config (VP hours / Trade hours):")
     for sess_name, cfg in SESSIONS_CONFIG.items():
         logger.info(f"  {sess_name}: VP={cfg['vp_start']}-{cfg['vp_end']} | Trade={cfg['trade_start']}-{cfg['trade_end']}")
-    
-    logger.info(f"Filters: Duration<{MAX_BREAKOUT_DURATION_MINUTES}min | POC>{MIN_POC_STRENGTH}x | Exclude:{EXCLUDED_VP_SHAPES}")
-    logger.info(f"Risk: {RISK_PERCENT*100}% | MIN_RR: {MIN_RR} | TP1_RR: {TP1_RR}")
+
+    logger.info(f"MR: RR>={MR_MIN_RR} | SL_OFF={MR_SL_OFFSET} | POC>={MR_MIN_POC_STRENGTH}x | Duration<{MR_MAX_BREAKOUT_DURATION_MINUTES}min | Split={MR_TP1_SPLIT:.0%}/{MR_TP2_SPLIT:.0%}")
+    logger.info(f"CB: RR>={CB_MIN_RR} | SL_OFF={CB_SL_OFFSET} | POC>={CB_MIN_POC_STRENGTH}x | ExclHours={CB_EXCLUDED_HOURS} | Split={CB_TP1_SPLIT:.0%}/{CB_TP2_SPLIT:.0%}")
+    logger.info(f"Risk: {RISK_PERCENT*100}%")
     logger.info("=" * 60)
-    
+
     try:
         while True:
             ref_asset = list(asset_states.values())[0] if asset_states else None
