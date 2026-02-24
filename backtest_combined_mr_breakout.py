@@ -41,11 +41,11 @@ SHOW_OPEN_TRADES = False
 # MR-SPECIFIC CONFIG (Mean Reversion)
 # =============================================================================
 MR_TP_MODE = "POC"            # TP target for MR (POC of session VP)
-MR_MIN_RR = 2.5
+MR_MIN_RR = 1.5
 MR_SL_OFFSET = 1.0
-MR_TP1_RR = 1.3
-MR_TP1_SPLIT = 0.5
-MR_TP2_SPLIT = 0.5
+MR_TP1_RR = 1.5
+MR_TP1_SPLIT = 0.7
+MR_TP2_SPLIT = 0.3
 MR_USE_TRAILING = True
 MR_USE_VP_STRUCTURE_FILTER = True
 MR_MIN_POC_STRENGTH = 2.0
@@ -58,7 +58,7 @@ MR_EXCLUDED_HOURS = []
 # CB-SPECIFIC CONFIG (Confirmed Breakout)
 # =============================================================================
 CB_MIN_RR = 2.0
-CB_SL_OFFSET = 1.0
+CB_SL_OFFSET = 0.75
 CB_TP1_RR = 1.0
 CB_TP1_SPLIT = 0.3
 CB_TP2_SPLIT = 0.7
@@ -376,9 +376,9 @@ def display_last_trades(df_trades, count):
             tp1_pct = int(CB_TP1_SPLIT * 100)
             tp2_pct = int(CB_TP2_SPLIT * 100)
 
-        print(f"\n{'─' * 100}")
+        print(f"\n{'-' * 100}")
         print(f"TRADE #{idx + 1} | {trade['symbol']} | [{strat}] {trade['type']} | {emoji} {trade['result']} | {trade['pnl_r']:+.2f}R")
-        print(f"{'─' * 100}")
+        print(f"{'-' * 100}")
         entry_time = trade['entry_time'].strftime('%Y-%m-%d %H:%M') if pd.notna(trade['entry_time']) else "N/A"
         exit_time = trade['exit_time'].strftime('%H:%M') if pd.notna(trade['exit_time']) else "N/A"
         breakout_time = trade['breakout_time'].strftime('%H:%M') if pd.notna(trade['breakout_time']) else "N/A"
@@ -448,6 +448,7 @@ def run_backtest():
                 'structural': StructuralLevelsTracker(tick_size=asset['tick_size'], va_percent=asset['va_percent']),
                 'state': "INSIDE",
                 'active_trade': None,
+                'ghost_trade': None,
                 'current_session': None,
                 'session_start_dt': None,
                 # Breakout tracking
@@ -460,6 +461,9 @@ def run_backtest():
                 # Cooldown
                 'last_loss_time': None,
                 'last_loss_direction': None,
+                # ATR tracking (rolling 60-candle True Range)
+                'atr_buffer': [],
+                'current_atr': None,
             }
             print(f"   + {asset['symbol']}: {len(df_candles):,} candles | {len(df_ticks):,} ticks")
     conn.close()
@@ -525,7 +529,7 @@ def run_backtest():
 
     symbols_list = list(assets_data.keys())
 
-    # ── HEADER ──
+    # -- HEADER --
     strategies_active = []
     if ENABLE_MR: strategies_active.append("MR")
     if ENABLE_CB: strategies_active.append("CB")
@@ -574,7 +578,7 @@ def run_backtest():
         row_week = row_week_start.strftime('%Y-%m-%d')
         row_month = row.dt.strftime('%Y-%m')
 
-        # ── Period tracking ──
+        # -- Period tracking --
         if current_day is not None and row_day != current_day:
             if DISPLAY_MODE == "DAILY" and day_trades > 0:
                 dwr = (day_wins / day_trades * 100) if day_trades > 0 else 0
@@ -610,6 +614,19 @@ def run_backtest():
             prices_struct, volumes_struct, _ = ad['ticks_by_minute'][current_minute]
             ad['structural'].update(row.dt, prices_struct, volumes_struct)
 
+        # ATR computation (rolling 60-candle True Range)
+        prev_close = ad.get('prev_close')
+        if prev_close is not None:
+            tr = max(row.high - row.low, abs(row.high - prev_close), abs(row.low - prev_close))
+        else:
+            tr = row.high - row.low
+        ad['prev_close'] = row.close
+        ad['atr_buffer'].append(tr)
+        if len(ad['atr_buffer']) > 60:
+            ad['atr_buffer'].pop(0)
+        if len(ad['atr_buffer']) >= 14:
+            ad['current_atr'] = sum(ad['atr_buffer']) / len(ad['atr_buffer'])
+
         # Skip warmup period (structural levels need 14 days of data)
         if row.dt < requested_start:
             continue
@@ -629,6 +646,7 @@ def run_backtest():
                 ad['candles_since_breakout'] = 0
                 ad['wait_highs'] = []
                 ad['wait_lows'] = []
+                ad['ghost_trade'] = None
                 ad['current_session'] = session_start
                 ad['session_start_dt'] = get_session_start_time(session_start, row.dt)
 
@@ -643,6 +661,39 @@ def run_backtest():
                         ad['vp'].add_ticks(prices[mask], volumes[mask])
                 else:
                     ad['vp'].add_ticks(prices, volumes)
+
+        # =================================================================
+        # STEP 3a: GHOST TRADE MANAGEMENT (PD POC blocking)
+        # =================================================================
+        ghost = ad.get('ghost_trade')
+        if ghost:
+            ghost_done = False
+            if ghost['type'] == 'LONG':
+                if row.low <= ghost['sl']:
+                    ghost_done = True
+                else:
+                    if not ghost['partial_closed']:
+                        tp1_price = ghost['entry'] + (ghost['risk'] * ghost['tp1_rr'])
+                        if row.high >= tp1_price:
+                            ghost['partial_closed'] = True
+                            ghost['sl'] = ghost['entry']
+                    if row.high >= ghost['tp']:
+                        ghost_done = True
+            else:  # SHORT
+                if row.high >= ghost['sl']:
+                    ghost_done = True
+                else:
+                    if not ghost['partial_closed']:
+                        tp1_price = ghost['entry'] - (ghost['risk'] * ghost['tp1_rr'])
+                        if row.low <= tp1_price:
+                            ghost['partial_closed'] = True
+                            ghost['sl'] = ghost['entry']
+                    if row.low <= ghost['tp']:
+                        ghost_done = True
+            if ghost_done:
+                ad['ghost_trade'] = None
+            else:
+                continue  # slot blocked by ghost, skip everything
 
         # =================================================================
         # STEP 3: ACTIVE TRADE MANAGEMENT
@@ -763,6 +814,9 @@ def run_backtest():
                     'poc_at_entry': active_trade.get('poc_at_entry'),
                     'pd_vah': active_trade.get('pd_vah'), 'pd_val': active_trade.get('pd_val'), 'pd_poc': active_trade.get('pd_poc'),
                     'pw_vah': active_trade.get('pw_vah'), 'pw_val': active_trade.get('pw_val'), 'pw_poc': active_trade.get('pw_poc'),
+                    'atr_at_entry': active_trade.get('atr_at_entry'),
+                    'breakout_range': active_trade.get('breakout_range'),
+                    'risk_amount': active_trade['risk'],
                     'rr': active_trade['rr'], 'result': res, 'pnl': pnl, 'pnl_r': pnl_r,
                     'capital_after': current_capital, 'high_water_mark': high_water_mark,
                     'drawdown': high_water_mark - current_capital
@@ -838,7 +892,7 @@ def run_backtest():
 
             trade_attempted = False
 
-            # ── REINTEGRATION → attempt MR ──
+            # -- REINTEGRATION → attempt MR --
             if reintegrated and ENABLE_MR:
                 total_mr_attempts += 1
                 # MR direction: opposite to breakout
@@ -932,6 +986,7 @@ def run_backtest():
                             pw_levels = ad['structural'].prev_week
 
                             mr_bo_duration = (row.dt - ad['breakout_time']).total_seconds() / 60.0
+                            breakout_range = max(ad['wait_highs']) - min(ad['wait_lows'])
                             ad['active_trade'] = {
                                 'type': direction, 'strategy': 'MR',
                                 'entry': close, 'sl': sl, 'original_sl': sl, 'risk': risk,
@@ -942,6 +997,8 @@ def run_backtest():
                                 'wait_candles': ad['candles_since_breakout'],
                                 'breakout_duration_min': mr_bo_duration,
                                 'poc_strength': poc_strength, 'vp_shape': vp_shape,
+                                'atr_at_entry': ad['current_atr'],
+                                'breakout_range': breakout_range,
                                 'tp1_time': None, 'tp2_time': None, 'exit_time': None, 'exit_price': None,
                                 'vah_at_entry': vah, 'val_at_entry': val, 'poc_at_entry': poc,
                                 'pd_vah': pd_levels['vah'], 'pd_val': pd_levels['val'], 'pd_poc': pd_levels['poc'],
@@ -956,7 +1013,7 @@ def run_backtest():
                 ad['wait_highs'] = []
                 ad['wait_lows'] = []
 
-            # ── CONFIRMED OUTSIDE → attempt CB ──
+            # -- CONFIRMED OUTSIDE → attempt CB --
             elif confirmed_outside and ENABLE_CB:
                 total_cb_attempts += 1
                 # CB direction: same as breakout
@@ -1015,6 +1072,20 @@ def run_backtest():
                                 tp_label = label
                                 break
 
+                        # Ghost trade: if best target is PD_POC, block the slot without risking capital
+                        if tp is not None and tp_label == 'PD_POC':
+                            ad['ghost_trade'] = {
+                                'type': direction, 'entry': close, 'sl': sl, 'tp': tp,
+                                'tp1_rr': CB_TP1_RR, 'risk': risk,
+                                'partial_closed': False,
+                            }
+                            filtered_cb_no_target += 1
+                            trade_attempted = True
+                            ad['state'] = "INSIDE"
+                            ad['breakout_direction'] = None
+                            ad['candles_since_breakout'] = 0
+                            continue
+
                         if tp is None:
                             filtered_cb_no_target += 1
                             # Fallback: fixed RR
@@ -1040,6 +1111,7 @@ def run_backtest():
                         pd_levels = ad['structural'].prev_day
                         pw_levels = ad['structural'].prev_week
 
+                        breakout_range = max(ad['wait_highs']) - min(ad['wait_lows'])
                         ad['active_trade'] = {
                             'type': direction, 'strategy': 'CB',
                             'entry': close, 'sl': sl, 'original_sl': sl, 'risk': risk,
@@ -1049,6 +1121,8 @@ def run_backtest():
                             'breakout_time': ad['breakout_time'], 'entry_time': row.dt,
                             'wait_candles': ad['candles_since_breakout'],
                             'poc_strength': poc_strength, 'vp_shape': vp_shape,
+                            'atr_at_entry': ad['current_atr'],
+                            'breakout_range': breakout_range,
                             'tp1_time': None, 'tp2_time': None, 'exit_time': None, 'exit_price': None,
                             'vah_at_entry': vah, 'val_at_entry': val, 'poc_at_entry': poc,
                             'pd_vah': pd_levels['vah'], 'pd_val': pd_levels['val'], 'pd_poc': pd_levels['poc'],
@@ -1078,7 +1152,7 @@ def run_backtest():
 
             # If not reintegrated and not yet enough candles, stay in BREAKOUT state
 
-    # ── Last period ──
+    # -- Last period --
     if DISPLAY_MODE == "DAILY" and day_trades > 0:
         dwr = (day_wins/day_trades*100) if day_trades>0 else 0; ddd = (day_max_dd/day_high_water*100) if day_high_water>0 else 0; dpnl_pct = ((current_capital-day_start_capital)/day_start_capital*100) if day_start_capital>0 else 0
         print(f"{current_day} | {day_trades:>6} | {day_wins:>4} | {day_trades-day_wins:>4} | {dwr:>5.1f}% | {day_pnl_r:>+7.1f}R | {dpnl_pct:>+7.2f}% | ${current_capital:>13,.2f} | {ddd:>7.2f}% | {max_dd_percent:>7.2f}%")
@@ -1129,9 +1203,9 @@ def run_backtest():
     max_losing_streak = losing_streaks.max() if len(losing_streaks) > 0 else 0
     max_winning_streak = winning_streaks.max() if len(winning_streaks) > 0 else 0
 
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print("PERFORMANCE GLOBALE")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     print(f"  Capital Initial:      ${INITIAL_CAPITAL:>14,.2f}")
     print(f"  Capital Final:        ${current_capital:>14,.2f}")
     print(f"  Profit/Perte:         ${total_pnl:>+14,.2f} ({total_pnl/INITIAL_CAPITAL*100:+.2f}%)")
@@ -1139,9 +1213,9 @@ def run_backtest():
     print(f"  Max Drawdown:         {max_dd_percent:>13.2f}%")
     print(f"  Recovery Factor:      {recovery_factor:>14.2f}")
 
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print("STATISTIQUES DE TRADING")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     print(f"  Trades Total:         {total_trades:>14}")
     if be_trades > 0:
         print(f"  Wins / BE / Losses:   {wins:>5} / {be_trades:>3} / {losses:<5}")
@@ -1155,9 +1229,9 @@ def run_backtest():
     print(f"  Avg R:R (winners):    {avg_rr_winners:>14.2f}")
 
     # Exit scenarios
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print("SCENARIOS DE SORTIE")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     tp1_tp2 = len(df_trades[(df_trades['result']=='WIN') & (df_trades['tp1_time'].notna())])
     tp2_direct = len(df_trades[(df_trades['result']=='WIN') & (df_trades['tp1_time'].isna())])
     sl_direct = len(df_trades[(df_trades['result']=='LOSS') & (df_trades['tp1_time'].isna())])
@@ -1167,10 +1241,10 @@ def run_backtest():
     if tp2_direct > 0:
         print(f"  TP2 direct:             {tp2_direct:>5}")
 
-    # ── STRATEGY BREAKDOWN ──
-    print(f"\n{'─' * 60}")
+    # -- STRATEGY BREAKDOWN --
+    print(f"\n{'-' * 60}")
     print("BREAKDOWN PAR STRATEGIE")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     print(f"{'STRAT':<6} | {'TRADES':>7} | {'WIN':>5} | {'BE':>4} | {'LOSS':>5} | {'WR%':>7} | {'PnL R':>9} | {'Avg R':>7} | {'PF':>6}")
     print("-" * 80)
     for strat_name in ['MR', 'CB']:
@@ -1191,9 +1265,9 @@ def run_backtest():
         print(f"{strat_name:<6} | {s_total:>7} | {s_wins:>5} | {s_be:>4} | {s_losses:>5} | {s_wr:>6.1f}% | {s_pnl:>+8.1f}R | {s_avg:>+6.2f}R | {pf_str:>6}")
 
     # Filters
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print("FILTRES APPLIQUES")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     if ENABLE_MR:
         print(f"  [MR] Tentatives:        {total_mr_attempts:>10}")
         print(f"  [MR] POC strength:      {filtered_mr_poc_strength:>10}")
@@ -1209,9 +1283,9 @@ def run_backtest():
     if 'tp_label' in df_trades.columns:
         cb_trades = df_trades[df_trades['strategy'] == 'CB']
         if len(cb_trades) > 0:
-            print(f"\n{'─' * 60}")
+            print(f"\n{'-' * 60}")
             print("PERFORMANCE PAR NIVEAU CIBLE (CB)")
-            print(f"{'─' * 60}")
+            print(f"{'-' * 60}")
             for label in ['PD_VAH', 'PD_POC', 'PD_VAL', 'PW_VAH', 'PW_POC', 'PW_VAL']:
                 lt = cb_trades[cb_trades['tp_label'] == label]
                 if len(lt) > 0:
@@ -1227,9 +1301,9 @@ def run_backtest():
                     print(f"  {label_display:<20} | {len(lt):>4} trades | WR: {lwr:>5.1f}% | PnL: {lpnl:>+8.1f}R | Avg: {lavg:>+5.2f}R | PF: {pf_str}")
 
     # Breakdown session
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print("BREAKDOWN PAR SESSION")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     print(f"{'SESSION':<10} | {'TRADES':>7} | {'WIN':>5} | {'LOSS':>5} | {'WR%':>7} | {'PnL R':>9} | {'PF':>6}")
     print("-" * 70)
     for session in ["TOKYO", "LONDON", "NY"]:
@@ -1246,9 +1320,9 @@ def run_backtest():
         print(f"{session:<10} | {len(st):>7} | {sw:>5} | {sl_count:>5} | {swr:>6.1f}% | {spnl:>+8.1f}R | {pf_str:>6}")
 
     # Breakdown direction
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print("BREAKDOWN PAR DIRECTION")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     for d in ["LONG", "SHORT"]:
         dt_dir = df_trades[df_trades['type'] == d]
         if len(dt_dir) == 0: continue
@@ -1263,9 +1337,9 @@ def run_backtest():
         print(f"  {d:<8} | {len(dt_dir):>7} trades | {dw:>5} W | {dl:>5} L | {dwr_val:>5.1f}% | {dpnl:>+8.1f}R | PF {pf_str}")
 
     # Breakdown day
-    print(f"\n{'─' * 60}")
+    print(f"\n{'-' * 60}")
     print("BREAKDOWN PAR JOUR")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     day_names = {0: 'Lundi', 1: 'Mardi', 2: 'Mercredi', 3: 'Jeudi', 4: 'Vendredi'}
     df_trades['day_of_week'] = df_trades['date'].dt.dayofweek
     for dow in range(5):
@@ -1280,9 +1354,9 @@ def run_backtest():
 
     # Breakdown hour
     if 'entry_hour' in df_trades.columns:
-        print(f"\n{'─' * 60}")
+        print(f"\n{'-' * 60}")
         print("PERFORMANCE PAR HEURE (UTC)")
-        print(f"{'─' * 60}")
+        print(f"{'-' * 60}")
         for hour in range(24):
             ht = df_trades[df_trades['entry_hour'] == hour]
             if len(ht) == 0: continue
@@ -1296,9 +1370,154 @@ def run_backtest():
             else: tag = "OFF"
             print(f"  {tag} {hour:02d}:00 | {len(ht):>4} trades | WR: {hwr:>5.1f}% | PnL: {hpnl:>+8.1f}R | Avg: {havg:>+5.2f}R")
 
-    print(f"\n{'─' * 60}")
+    # Breakdown by ATR tranches
+    if 'atr_at_entry' in df_trades.columns and df_trades['atr_at_entry'].notna().any():
+        print(f"\n{'-' * 80}")
+        print("PERFORMANCE PAR TRANCHE ATR (60-candle rolling ATR at entry)")
+        print(f"{'-' * 80}")
+        atr_trades = df_trades[df_trades['atr_at_entry'].notna()].copy()
+        atr_vals = atr_trades['atr_at_entry']
+        # Auto-compute percentile-based tranches
+        q_labels = ['0-20%', '20-40%', '40-60%', '60-80%', '80-100%']
+        atr_trades['atr_bucket'] = pd.qcut(atr_vals, 5, labels=q_labels, duplicates='drop')
+        # Also show absolute ranges
+        print(f"  ATR stats: min={atr_vals.min():.2f} | median={atr_vals.median():.2f} | max={atr_vals.max():.2f}")
+        print(f"  {'TRANCHE':<12} | {'ATR RANGE':<18} | {'TRADES':>6} | {'WIN':>4} | {'BE':>3} | {'LOSS':>5} | {'WR%':>6} | {'PnL R':>9} | {'Avg R':>7} | {'PF':>6}")
+        print("  " + "-" * 105)
+        for bucket in q_labels:
+            bt = atr_trades[atr_trades['atr_bucket'] == bucket]
+            if len(bt) == 0:
+                continue
+            bw = len(bt[bt['result'].isin(['WIN', 'BE'])])
+            b_be = len(bt[bt['result'] == 'BE'])
+            bl = len(bt[bt['result'] == 'LOSS'])
+            bwr = bw / len(bt) * 100
+            bpnl = bt['pnl_r'].sum()
+            bavg = bt['pnl_r'].mean()
+            bgp = bt[bt['pnl'] > 0]['pnl'].sum()
+            bgl = abs(bt[bt['pnl'] < 0]['pnl'].sum())
+            bpf = bgp / bgl if bgl > 0 else float('inf')
+            pf_str = f"{bpf:.2f}" if bpf != float('inf') else "inf"
+            atr_lo = bt['atr_at_entry'].min()
+            atr_hi = bt['atr_at_entry'].max()
+            print(f"  {bucket:<12} | {atr_lo:>7.2f} - {atr_hi:<7.2f} | {len(bt):>6} | {bw-b_be:>4} | {b_be:>3} | {bl:>5} | {bwr:>5.1f}% | {bpnl:>+8.1f}R | {bavg:>+6.2f}R | {pf_str:>6}")
+
+        # Same breakdown but per strategy
+        for strat_name in ['MR', 'CB']:
+            st = atr_trades[atr_trades['strategy'] == strat_name]
+            if len(st) == 0:
+                continue
+            print(f"\n  [{strat_name}] par tranche ATR:")
+            st_atr = st['atr_at_entry']
+            st['atr_bucket'] = pd.qcut(st_atr, 5, labels=q_labels, duplicates='drop')
+            print(f"  {'TRANCHE':<12} | {'ATR RANGE':<18} | {'TRADES':>6} | {'WR%':>6} | {'PnL R':>9} | {'Avg R':>7} | {'PF':>6}")
+            print("  " + "-" * 80)
+            for bucket in q_labels:
+                bt = st[st['atr_bucket'] == bucket]
+                if len(bt) == 0:
+                    continue
+                bw = len(bt[bt['result'].isin(['WIN', 'BE'])])
+                bwr = bw / len(bt) * 100
+                bpnl = bt['pnl_r'].sum()
+                bavg = bt['pnl_r'].mean()
+                bgp = bt[bt['pnl'] > 0]['pnl'].sum()
+                bgl = abs(bt[bt['pnl'] < 0]['pnl'].sum())
+                bpf = bgp / bgl if bgl > 0 else float('inf')
+                pf_str = f"{bpf:.2f}" if bpf != float('inf') else "inf"
+                atr_lo = bt['atr_at_entry'].min()
+                atr_hi = bt['atr_at_entry'].max()
+                print(f"  {bucket:<12} | {atr_lo:>7.2f} - {atr_hi:<7.2f} | {len(bt):>6} | {bwr:>5.1f}% | {bpnl:>+8.1f}R | {bavg:>+6.2f}R | {pf_str:>6}")
+
+    # Breakdown by breakout range tranches
+    if 'breakout_range' in df_trades.columns and df_trades['breakout_range'].notna().any():
+        print(f"\n{'-' * 80}")
+        print("PERFORMANCE PAR TAILLE DE BREAKOUT (range des bougies breakout)")
+        print(f"{'-' * 80}")
+        br_trades = df_trades[df_trades['breakout_range'].notna()].copy()
+        br_vals = br_trades['breakout_range']
+        q_labels = ['Micro', 'Petit', 'Moyen', 'Grand', 'Tres Grand']
+        br_trades['br_bucket'] = pd.qcut(br_vals, 5, labels=q_labels, duplicates='drop')
+        print(f"  Range stats: min={br_vals.min():.2f} | median={br_vals.median():.2f} | max={br_vals.max():.2f}")
+        print(f"  {'TRANCHE':<12} | {'RANGE':<18} | {'TRADES':>6} | {'WIN':>4} | {'BE':>3} | {'LOSS':>5} | {'WR%':>6} | {'PnL R':>9} | {'Avg R':>7} | {'PF':>6}")
+        print("  " + "-" * 105)
+        for bucket in q_labels:
+            bt = br_trades[br_trades['br_bucket'] == bucket]
+            if len(bt) == 0:
+                continue
+            bw = len(bt[bt['result'].isin(['WIN', 'BE'])])
+            b_be = len(bt[bt['result'] == 'BE'])
+            bl = len(bt[bt['result'] == 'LOSS'])
+            bwr = bw / len(bt) * 100
+            bpnl = bt['pnl_r'].sum()
+            bavg = bt['pnl_r'].mean()
+            bgp = bt[bt['pnl'] > 0]['pnl'].sum()
+            bgl = abs(bt[bt['pnl'] < 0]['pnl'].sum())
+            bpf = bgp / bgl if bgl > 0 else float('inf')
+            pf_str = f"{bpf:.2f}" if bpf != float('inf') else "inf"
+            rng_lo = bt['breakout_range'].min()
+            rng_hi = bt['breakout_range'].max()
+            print(f"  {bucket:<12} | {rng_lo:>7.2f} - {rng_hi:<7.2f} | {len(bt):>6} | {bw-b_be:>4} | {b_be:>3} | {bl:>5} | {bwr:>5.1f}% | {bpnl:>+8.1f}R | {bavg:>+6.2f}R | {pf_str:>6}")
+
+        # Per strategy
+        for strat_name in ['MR', 'CB']:
+            st = br_trades[br_trades['strategy'] == strat_name]
+            if len(st) == 0:
+                continue
+            print(f"\n  [{strat_name}] par taille de breakout:")
+            st_br = st['breakout_range']
+            st['br_bucket'] = pd.qcut(st_br, 5, labels=q_labels, duplicates='drop')
+            print(f"  {'TRANCHE':<12} | {'RANGE':<18} | {'TRADES':>6} | {'WR%':>6} | {'PnL R':>9} | {'Avg R':>7} | {'PF':>6}")
+            print("  " + "-" * 80)
+            for bucket in q_labels:
+                bt = st[st['br_bucket'] == bucket]
+                if len(bt) == 0:
+                    continue
+                bw = len(bt[bt['result'].isin(['WIN', 'BE'])])
+                bwr = bw / len(bt) * 100
+                bpnl = bt['pnl_r'].sum()
+                bavg = bt['pnl_r'].mean()
+                bgp = bt[bt['pnl'] > 0]['pnl'].sum()
+                bgl = abs(bt[bt['pnl'] < 0]['pnl'].sum())
+                bpf = bgp / bgl if bgl > 0 else float('inf')
+                pf_str = f"{bpf:.2f}" if bpf != float('inf') else "inf"
+                rng_lo = bt['breakout_range'].min()
+                rng_hi = bt['breakout_range'].max()
+                print(f"  {bucket:<12} | {rng_lo:>7.2f} - {rng_hi:<7.2f} | {len(bt):>6} | {bwr:>5.1f}% | {bpnl:>+8.1f}R | {bavg:>+6.2f}R | {pf_str:>6}")
+
+    # Breakdown by breakout_range / ATR ratio
+    if 'atr_at_entry' in df_trades.columns and 'breakout_range' in df_trades.columns:
+        combo = df_trades[(df_trades['atr_at_entry'].notna()) & (df_trades['breakout_range'].notna()) & (df_trades['atr_at_entry'] > 0)].copy()
+        if len(combo) > 0:
+            combo['range_atr_ratio'] = combo['breakout_range'] / combo['atr_at_entry']
+            print(f"\n{'-' * 80}")
+            print("PERFORMANCE PAR RATIO BREAKOUT_RANGE / ATR")
+            print(f"{'-' * 80}")
+            ratio_vals = combo['range_atr_ratio']
+            q_labels = ['< 0.5x', '0.5-1x', '1-1.5x', '1.5-2x', '> 2x']
+            bins = [0, 0.5, 1.0, 1.5, 2.0, float('inf')]
+            combo['ratio_bucket'] = pd.cut(ratio_vals, bins=bins, labels=q_labels, include_lowest=True)
+            print(f"  Ratio stats: min={ratio_vals.min():.2f}x | median={ratio_vals.median():.2f}x | max={ratio_vals.max():.2f}x")
+            print(f"  {'TRANCHE':<12} | {'TRADES':>6} | {'WIN':>4} | {'BE':>3} | {'LOSS':>5} | {'WR%':>6} | {'PnL R':>9} | {'Avg R':>7} | {'PF':>6}")
+            print("  " + "-" * 80)
+            for bucket in q_labels:
+                bt = combo[combo['ratio_bucket'] == bucket]
+                if len(bt) == 0:
+                    continue
+                bw = len(bt[bt['result'].isin(['WIN', 'BE'])])
+                b_be = len(bt[bt['result'] == 'BE'])
+                bl = len(bt[bt['result'] == 'LOSS'])
+                bwr = bw / len(bt) * 100
+                bpnl = bt['pnl_r'].sum()
+                bavg = bt['pnl_r'].mean()
+                bgp = bt[bt['pnl'] > 0]['pnl'].sum()
+                bgl = abs(bt[bt['pnl'] < 0]['pnl'].sum())
+                bpf = bgp / bgl if bgl > 0 else float('inf')
+                pf_str = f"{bpf:.2f}" if bpf != float('inf') else "inf"
+                print(f"  {bucket:<12} | {len(bt):>6} | {bw-b_be:>4} | {b_be:>3} | {bl:>5} | {bwr:>5.1f}% | {bpnl:>+8.1f}R | {bavg:>+6.2f}R | {pf_str:>6}")
+
+    print(f"\n{'-' * 60}")
     print("STATISTIQUES TEMPORELLES")
-    print(f"{'─' * 60}")
+    print(f"{'-' * 60}")
     print(f"  Jours de Trading:     {trading_days:>14}")
     print(f"  Trades/Jour (avg):    {avg_trades_per_day:>14.1f}")
     print(f"  Max Serie Gagnante:   {max_winning_streak:>14}")
